@@ -149,6 +149,30 @@ class TestConfigValidation(Base):
                 pt.check_branch_name(bad)
 
 
+class TestUpstream(Base):
+    def test_branch_gets_no_upstream_when_based_on_a_remote_ref(self):
+        """Branching off origin/dev must NOT leave the feature tracking dev:
+        git would then suggest `git push origin HEAD:dev` on a failed push."""
+        origin = self.tmp / "origin.git"
+        subprocess.run(["git", "init", "-q", "--bare", str(origin)], check=True)
+        git(self.api, "remote", "add", "origin", str(origin))
+        git(self.api, "push", "-q", "-u", "origin", "main")
+        git(self.api, "checkout", "-q", "-b", "dev")
+        git(self.api, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "dev")
+        git(self.api, "push", "-q", "-u", "origin", "dev")
+        git(self.api, "checkout", "-q", "main")
+
+        cfg = self.write_config(api_base="origin/dev")
+        self.new(cfg, "feat-up")
+        wt = pt.worktrees_of(str(self.api))["feat-up"]
+        upstream = subprocess.run(
+            ["git", "-C", wt, "rev-parse", "--abbrev-ref", "@{upstream}"], capture_output=True, text=True
+        )
+        self.assertNotEqual(upstream.returncode, 0, f"expected no upstream, got {upstream.stdout.strip()!r}")
+        # …and the base is still right: the branch must contain dev's commit.
+        self.assertEqual(git(wt, "log", "--oneline", "-1", "--format=%s").strip(), "dev")
+
+
 class TestNewAndRollback(Base):
     def test_creates_in_every_repo(self):
         cfg = self.write_config()

@@ -278,7 +278,12 @@ def create_git(cfg: dict, repo: dict, branch: str) -> str:
     base = repo.get("base") or cfg.get("base") or default_base(repo)
     dest = dest_for(cfg, repo, branch)
     git(repo["path"], "fetch", "--quiet", "origin", check=False)  # best effort
-    git(repo["path"], "worktree", "add", "-b", branch, dest, base)
+    # --no-track matters: branching off a remote ref like origin/dev would, with
+    # git's default branch.autoSetupMerge, make the feature branch track dev. Then
+    # `git push` fails and helpfully suggests `git push origin HEAD:dev` — pushing
+    # unreviewed work onto the shared branch. Orca's backend sets no upstream
+    # either, so this also keeps the two backends consistent.
+    git(repo["path"], "worktree", "add", "-b", branch, "--no-track", dest, base)
     return dest
 
 

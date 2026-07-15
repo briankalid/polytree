@@ -62,6 +62,20 @@ path = "~/code/my-web"
 
 Each repo's directory name must be unique — it's the folder name under `<root>/<branch>/`. Set `name = "..."` explicitly if two repos share a basename.
 
+### Which ref do the branches start from?
+
+Per repo, in order: that repo's `base` → the global `base` → the repo's `origin/HEAD` → its local default branch. If none of those resolve, polytree tells you instead of guessing.
+
+If you leave `base` unset the two backends differ: the git backend uses `origin/HEAD`, while the orca backend defers to the base ref you configured for that repo in Orca. Set `base` explicitly if you need them to agree.
+
+### Upstream
+
+Branches are created with **no upstream**, on purpose. Branching off a remote ref like `origin/dev` would otherwise make your feature branch track `dev` (git's default `branch.autoSetupMerge`): `git push` then fails and suggests `git push origin HEAD:dev` — which pushes unreviewed work straight onto the shared branch. Publish the normal way instead:
+
+```bash
+git push -u origin <branch>
+```
+
 ## Commands
 
 | Command | What it does |
