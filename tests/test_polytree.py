@@ -54,7 +54,10 @@ class Base(unittest.TestCase):
         return pt.load_config()
 
     def new(self, cfg, name, **kw):
-        args = argparse.Namespace(name=name, host=None, no_launch=True, base=None, **kw)
+        d = dict(name=name, host=None, no_launch=True, base=None, existing=False,
+                 agent=None, issue=None, prompt=None)
+        d.update(kw)
+        args = argparse.Namespace(**d)
         pt.cmd_new(cfg, args)
 
 
@@ -205,10 +208,10 @@ class TestNewAndRollback(Base):
         cfg = self.write_config()
         real = pt.create_git
 
-        def boom(c, repo, branch, override=None):
+        def boom(c, repo, branch, override=None, existing=False):
             if repo["name"] == "web":
                 pt.die("simulated failure creating web's worktree")
-            return real(c, repo, branch, override)
+            return real(c, repo, branch, override, existing)
 
         pt.create_git = boom
         self.addCleanup(lambda: setattr(pt, "create_git", real))
@@ -314,7 +317,7 @@ class TestAgentValidatedBeforeSideEffects(Base):
         cfg = self.write_config()
         cfg["agent"] = "typo-agent"
         with self.assertRaises(pt.Fail):
-            pt.cmd_new(cfg, argparse.Namespace(name="x", host=None, no_launch=False, base=None))
+            pt.cmd_new(cfg, argparse.Namespace(name="x", host=None, no_launch=False, base=None, existing=False, agent=None, issue=None, prompt=None))
         self.assertNotIn("x", pt.worktrees_of(str(self.api)))
         self.assertNotIn("x", pt.worktrees_of(str(self.web)))
 
@@ -322,7 +325,7 @@ class TestAgentValidatedBeforeSideEffects(Base):
         cfg = self.write_config()
         cfg["agents"]["fake"]["cmd"] = "definitely-not-a-real-binary-xyz"
         with self.assertRaises(pt.Fail):
-            pt.cmd_new(cfg, argparse.Namespace(name="y", host=None, no_launch=False, base=None))
+            pt.cmd_new(cfg, argparse.Namespace(name="y", host=None, no_launch=False, base=None, existing=False, agent=None, issue=None, prompt=None))
         self.assertNotIn("y", pt.worktrees_of(str(self.api)))
 
 
@@ -382,11 +385,11 @@ class TestRollbackOnInterrupt(Base):
         real = pt.create_git
         calls = []
 
-        def boom(c, repo, branch, override=None):
+        def boom(c, repo, branch, override=None, existing=False):
             if repo["name"] == "web":
                 raise KeyboardInterrupt
             calls.append(repo["name"])
-            return real(c, repo, branch, override)
+            return real(c, repo, branch, override, existing)
 
         pt.create_git = boom
         self.addCleanup(lambda: setattr(pt, "create_git", real))
@@ -401,8 +404,20 @@ class TestLink(Base):
     def test_needs_two_worktrees(self):
         cfg = self.write_config()
         with self.assertRaises(pt.Fail) as e:
-            pt.cmd_link(cfg, argparse.Namespace(branch="nope", host=None))
+            pt.cmd_link(cfg, argparse.Namespace(branch="nope", host=None, agent=None, prompt=None))
         self.assertIn("need >=2", str(e.exception))
+        self.assertIn("polytree new nope", str(e.exception))
+        self.assertNotIn("--existing", str(e.exception))  # no branch -> plain new
+
+    def test_suggests_existing_when_the_branch_is_already_there(self):
+        """A colleague's branch with no worktrees: plain `new` would refuse, so
+        the hint must not send you into it."""
+        for r in (self.api, self.web):
+            git(r, "branch", "their-pr", "main")
+        cfg = self.write_config()
+        with self.assertRaises(pt.Fail) as e:
+            pt.cmd_link(cfg, argparse.Namespace(branch="their-pr", host=None, agent=None, prompt=None))
+        self.assertIn("polytree new their-pr --existing", str(e.exception))
 
     def test_refuses_to_shift_host_silently(self):
         """Host (api) lacks the worktree but web+lib have it: 2 present, so the
@@ -423,7 +438,7 @@ class TestLink(Base):
             git(r, "worktree", "add", "-q", "-b", "shift2", str(self.tmp / f"s-{r.name}"))
 
         with self.assertRaises(pt.Fail) as e:
-            pt.cmd_link(cfg, argparse.Namespace(branch="shift2", host=None))
+            pt.cmd_link(cfg, argparse.Namespace(branch="shift2", host=None, agent=None, prompt=None))
         self.assertIn("has no worktree", str(e.exception))
 
     def test_explicit_host_allows_the_shift(self):
@@ -443,8 +458,8 @@ class TestLink(Base):
         launched = {}
         real_launch = pt.launch
         self.addCleanup(lambda: setattr(pt, "launch", real_launch))
-        pt.launch = lambda c, s, host, others: launched.update(host=host, others=others)
-        pt.cmd_link(cfg, argparse.Namespace(branch="shift3", host="web"))
+        pt.launch = lambda c, s, host, others, prompt=None: launched.update(host=host, others=others)
+        pt.cmd_link(cfg, argparse.Namespace(branch="shift3", host="web", agent=None, prompt=None))
         self.assertEqual(launched["host"], str(self.tmp / "t-web"))
         self.assertEqual(launched["others"], [str(self.tmp / "t-lib")])
 
@@ -461,6 +476,97 @@ class TestEmptyDirCleanup(Base):
         self.new(cfg, "shell")
         pt.cmd_rm(cfg, argparse.Namespace(branch="shell", force=True))
         self.assertFalse((self.tmp / "wt" / "shell").exists())
+
+
+class TestExisting(Base):
+    def test_checks_out_an_existing_branch(self):
+        """Reviewing someone's branch: it exists in both repos already."""
+        for r in (self.api, self.web):
+            git(r, "branch", "colleague-pr", "main")
+        cfg = self.write_config()
+        self.new(cfg, "colleague-pr", existing=True)
+        self.assertIn("colleague-pr", pt.worktrees_of(str(self.api)))
+        self.assertIn("colleague-pr", pt.worktrees_of(str(self.web)))
+
+    def test_without_existing_an_existing_branch_is_rejected(self):
+        git(self.api, "branch", "there", "main")
+        cfg = self.write_config()
+        with self.assertRaises(pt.Fail) as e:
+            self.new(cfg, "there")
+        self.assertIn("--existing", str(e.exception))  # tells you the way out
+
+    def test_existing_needs_the_branch_in_every_repo(self):
+        git(self.api, "branch", "half", "main")  # only api has it
+        cfg = self.write_config()
+        with self.assertRaises(pt.Fail) as e:
+            self.new(cfg, "half", existing=True)
+        self.assertIn("does not exist in web", str(e.exception))
+        self.assertNotIn("half", pt.worktrees_of(str(self.api)))  # nothing created
+
+    def test_existing_with_base_is_rejected(self):
+        cfg = self.write_config()
+        with self.assertRaises(pt.Fail) as e:
+            self.new(cfg, "x", existing=True, base="origin/master")
+        self.assertIn("--base", str(e.exception))
+
+
+class TestAgentAndPromptOverrides(Base):
+    def test_agent_override(self):
+        cfg = self.write_config(extra='\n[agents.other]\ncmd = "echo"\nattach = "--dir {dir}"\n')
+        launched = {}
+        real = pt.launch
+        self.addCleanup(lambda: setattr(pt, "launch", real))
+        pt.launch = lambda c, s, h, o, prompt=None: launched.update(agent=c["agent"], spec=s)
+        pt.cmd_new(cfg, argparse.Namespace(name="ov", host=None, no_launch=False, base=None,
+                                           existing=False, agent="other", issue=None, prompt=None))
+        self.assertEqual(launched["agent"], "other")
+        self.assertEqual(launched["spec"]["attach"], "--dir {dir}")
+
+    def test_prompt_is_appended_as_positional(self):
+        cfg = self.write_config()
+        argv, _ = pt.build_argv(cfg, cfg["agents"]["fake"], ["/a"], "implement the thing")
+        self.assertEqual(argv[-1], "implement the thing")
+
+    def test_no_prompt_appends_nothing(self):
+        cfg = self.write_config()
+        argv, _ = pt.build_argv(cfg, cfg["agents"]["fake"], ["/a"])
+        self.assertEqual(argv, ["true", "--add-dir", "/a"])
+
+    def test_issue_needs_orca_backend(self):
+        cfg = self.write_config()  # backend = git
+        with self.assertRaises(pt.Fail) as e:
+            self.new(cfg, "iss", issue="42")
+        self.assertIn("orca backend", str(e.exception))
+
+
+class TestList(Base):
+    def test_lists_only_sets_present_in_two_repos(self):
+        cfg = self.write_config()
+        self.new(cfg, "both-repos")
+        git(self.api, "worktree", "add", "-q", "-b", "api-only", str(self.tmp / "solo"))
+        out = []
+        real = pt.info
+        self.addCleanup(lambda: setattr(pt, "info", real))
+        pt.info = out.append
+        pt.cmd_list(cfg, argparse.Namespace())
+        text = "\n".join(out)
+        self.assertIn("both-repos", text)
+        self.assertIn("(2/2 repos)", text)
+        self.assertNotIn("api-only", text)  # a lone worktree is not a feature set
+        self.assertNotIn("main", text)  # main checkouts are not either
+
+    def test_reports_dirty(self):
+        cfg = self.write_config()
+        self.new(cfg, "messy")
+        (Path(pt.worktrees_of(str(self.web))["messy"]) / "x.txt").write_text("x")
+        out = []
+        real = pt.info
+        self.addCleanup(lambda: setattr(pt, "info", real))
+        pt.info = out.append
+        pt.cmd_list(cfg, argparse.Namespace())
+        text = "\n".join(out)
+        self.assertRegex(text, r"web\s+dirty")
+        self.assertRegex(text, r"api\s+clean")
 
 
 class TestPickHost(Base):

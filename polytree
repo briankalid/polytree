@@ -287,9 +287,12 @@ def default_base(repo: dict) -> str:
     )
 
 
-def create_git(cfg: dict, repo: dict, branch: str, override: str | None = None) -> str:
-    base = configured_base(cfg, repo, override) or default_base(repo)
+def create_git(cfg: dict, repo: dict, branch: str, override: str | None = None, existing: bool = False) -> str:
     dest = dest_for(cfg, repo, branch)
+    if existing:  # check the branch out as-is; it has whatever upstream it has
+        git(repo["path"], "worktree", "add", dest, branch)
+        return dest
+    base = configured_base(cfg, repo, override) or default_base(repo)
     # --no-track matters: branching off a remote ref like origin/dev would, with
     # git's default branch.autoSetupMerge, make the feature branch track dev. Then
     # `git push` fails and helpfully suggests `git push origin HEAD:dev` — pushing
@@ -299,7 +302,8 @@ def create_git(cfg: dict, repo: dict, branch: str, override: str | None = None) 
     return dest
 
 
-def create_orca(cfg: dict, repo: dict, branch: str, override: str | None = None) -> str:
+def create_orca(cfg: dict, repo: dict, branch: str, override: str | None = None,
+                existing: bool = False, issue: str | None = None) -> str:
     """Create through Orca, then locate the worktree with git.
 
     We deliberately do NOT parse Orca's JSON for the path: that schema is not a
@@ -308,9 +312,12 @@ def create_orca(cfg: dict, repo: dict, branch: str, override: str | None = None)
     """
     sel = repo.get("orca") or f"path:{repo['path']}"
     args = [orca_bin(), "worktree", "create", "--repo", sel, "--name", branch, "--json"]
-    base = configured_base(cfg, repo, override)
-    if base:  # nobody asked -> let Orca use the base ref configured for the repo
-        args += ["--base-branch", base]
+    if issue:
+        args += ["--issue", str(issue)]
+    if not existing:  # Orca checks an existing branch out as-is; no base applies
+        base = configured_base(cfg, repo, override)
+        if base:  # nobody asked -> let Orca use the base ref configured for the repo
+            args += ["--base-branch", base]
     run(args)
     path = worktrees_of(repo["path"]).get(branch)
     if not path:
@@ -407,18 +414,20 @@ def expand(template: str, directory: str) -> list[str]:
     return [tok.replace("{dir}", directory) for tok in shlex.split(template)]
 
 
-def build_argv(cfg: dict, spec: dict, others: list[str]) -> tuple[list[str], dict[str, str]]:
+def build_argv(cfg: dict, spec: dict, others: list[str], prompt: str | None = None) -> tuple[list[str], dict[str, str]]:
     argv = shlex.split(spec.get("cmd", cfg["agent"]))
     for d in others:
         argv += expand(spec["attach"], d)
         for filename, template in (spec.get("attach_if_exists") or {}).items():
             if (Path(d) / filename).exists():
                 argv += expand(template, d)
+    if prompt:  # claude/codex take an initial prompt as a positional argument
+        argv.append(prompt)
     return argv, {k: str(v) for k, v in (spec.get("env") or {}).items()}
 
 
-def launch(cfg: dict, spec: dict, host: str, others: list[str]) -> None:
-    argv, env = build_argv(cfg, spec, others)
+def launch(cfg: dict, spec: dict, host: str, others: list[str], prompt: str | None = None) -> None:
+    argv, env = build_argv(cfg, spec, others, prompt)
     info(f"→ {cfg['agent']} in:")
     info(f"    host : {host}")
     for d in others:
@@ -438,20 +447,36 @@ def launch(cfg: dict, spec: dict, host: str, others: list[str]) -> None:
 def cmd_new(cfg: dict, a: argparse.Namespace) -> None:
     branch = a.name
     check_branch_name(branch)
+    if a.existing and a.base:
+        die("--existing checks out a branch that already exists; --base has nothing to apply to")
+    if a.issue and cfg["backend"] != "orca":
+        die("--issue links the worktree to an issue in Orca; it needs the orca backend")
+    if a.agent:
+        cfg["agent"] = a.agent
     spec = None if a.no_launch else resolve_agent(cfg)  # fail before touching disk
 
     for r in cfg["repos"]:  # preflight: never create half a set
-        if git_ok(r["path"], "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"):
+        has_branch = git_ok(r["path"], "show-ref", "--verify", "--quiet", f"refs/heads/{branch}")
+        if a.existing and not has_branch:
+            die(
+                f"branch {branch!r} does not exist in {r['name']} — nothing was created.\n"
+                f"Fetch it first, or drop --existing to create it."
+            )
+        if not a.existing and has_branch:
             die(
                 f"branch {branch!r} already exists in {r['name']} — nothing was created.\n"
-                f"Use `polytree link {branch}` if the worktrees exist, `polytree rm {branch}` to "
-                f"clean up, or pick another name."
+                f"Use --existing to check it out, `polytree link {branch}` if the worktrees "
+                f"exist, `polytree rm {branch}` to clean up, or pick another name."
             )
+        if worktrees_of(r["path"]).get(branch):
+            die(f"{r['name']} already has a worktree for {branch!r} — nothing was created")
         if cfg["backend"] == "git" and Path(dest_for(cfg, r, branch)).exists():
             die(f"{dest_for(cfg, r, branch)} already exists — nothing was created")
         # Fetch first so a base like origin/master resolves, then check it exists
         # here rather than discovering it halfway through creating the set.
         git(r["path"], "fetch", "--quiet", "origin", check=False)  # best effort
+        if a.existing:
+            continue
         base = configured_base(cfg, r, a.base) or (default_base(r) if cfg["backend"] == "git" else None)
         if base and not git_ok(r["path"], "rev-parse", "--verify", "--quiet", f"{base}^{{commit}}"):
             die(f"base {base!r} does not exist in {r['name']} — nothing was created")
@@ -460,8 +485,8 @@ def cmd_new(cfg: dict, a: argparse.Namespace) -> None:
     created: list[tuple[dict, str]] = []
     try:
         for r in cfg["repos"]:
-            path = (create_orca(cfg, r, branch, a.base) if cfg["backend"] == "orca"
-                    else create_git(cfg, r, branch, a.base))
+            path = (create_orca(cfg, r, branch, a.base, a.existing, a.issue) if cfg["backend"] == "orca"
+                    else create_git(cfg, r, branch, a.base, a.existing))
             created.append((r, path))
             info(f"  {r['name']:<20} -> {path}")
     except Fail as e:
@@ -474,7 +499,7 @@ def cmd_new(cfg: dict, a: argparse.Namespace) -> None:
     if a.no_launch:
         return
     _, host_path = pick_host(created, a.host)
-    launch(cfg, spec, host_path, [p for _, p in created if p != host_path])
+    launch(cfg, spec, host_path, [p for _, p in created if p != host_path], a.prompt)
 
 
 def cmd_link(cfg: dict, a: argparse.Namespace) -> None:
@@ -483,10 +508,14 @@ def cmd_link(cfg: dict, a: argparse.Namespace) -> None:
     present = [(r, p) for r, p in pairs if p]
     missing = [r["name"] for r, p in pairs if not p]
     if len(present) < 2:
+        # Suggest the command that will actually work: if the branch already
+        # exists (a colleague's PR), plain `new` would just refuse.
+        exists_somewhere = any(branch_exists(r, branch) for r, _ in pairs)
+        fix = f"polytree new {branch} --existing" if exists_somewhere else f"polytree new {branch}"
         die(
             f"need >=2 worktrees for branch {branch!r}, found {len(present)}"
             + (f" (missing: {', '.join(missing)})" if missing else "")
-            + f".\nCreate the set with: polytree new {branch}"
+            + f".\nCreate the set with: {fix}"
         )
     if missing:
         info(f"warning: no worktree for {branch!r} in: {', '.join(missing)}")
@@ -498,9 +527,11 @@ def cmd_link(cfg: dict, a: argparse.Namespace) -> None:
             f"Pass --host <repo> to run the agent elsewhere — its hooks and settings "
             f"are the ones that will load."
         )
+    if a.agent:
+        cfg["agent"] = a.agent
     spec = resolve_agent(cfg)
     _, host_path = pick_host(present, a.host)
-    launch(cfg, spec, host_path, [p for _, p in present if p != host_path])
+    launch(cfg, spec, host_path, [p for _, p in present if p != host_path], a.prompt)
 
 
 def cmd_paths(cfg: dict, a: argparse.Namespace) -> None:
@@ -556,6 +587,29 @@ def cmd_rm(cfg: dict, a: argparse.Namespace) -> None:
             info(f"  git -C {repo['path']} branch -D {a.branch}")
 
 
+def cmd_list(cfg: dict, _a: argparse.Namespace) -> None:
+    """Show the feature sets: branches with a worktree in 2+ configured repos.
+
+    This is the answer to "what am I working on?" — `link` needs a branch name,
+    and nobody remembers those.
+    """
+    sets: dict[str, list[tuple[dict, str]]] = {}
+    for r in cfg["repos"]:
+        for branch, path in worktrees_of(r["path"]).items():
+            if path != r["path"]:  # a main checkout is not part of a feature set
+                sets.setdefault(branch, []).append((r, path))
+    complete = {b: v for b, v in sets.items() if len(v) >= 2}
+    if not complete:
+        info("no feature sets (no branch has a worktree in 2+ configured repos)")
+        return
+    for branch in sorted(complete):
+        entries = complete[branch]
+        info(f"{branch}  ({len(entries)}/{len(cfg['repos'])} repos)")
+        for repo, path in entries:
+            state = "dirty" if is_dirty(path) else "clean"
+            info(f"  {repo['name']:<20} {state:<6} {path}")
+
+
 def cmd_ls(cfg: dict, _a: argparse.Namespace) -> None:
     info(f"backend : {cfg['backend']}" + ("" if cfg["backend"] == "git" else f"  ({orca_bin()})"))
     info(f"agent   : {cfg['agent']}")
@@ -580,12 +634,18 @@ def build_parser() -> argparse.ArgumentParser:
     n.add_argument("name", help="branch name, used in every repo")
     n.add_argument("--host", metavar="REPO", help="repo that hosts the agent (default: first in config)")
     n.add_argument("--base", metavar="REF", help="branch off this ref instead of the configured base (e.g. --base origin/master for a hotfix)")
+    n.add_argument("--existing", action="store_true", help="check out a branch that already exists (e.g. reviewing someone's PR)")
+    n.add_argument("--agent", metavar="NAME", help="agent for this run, overriding the config")
+    n.add_argument("--issue", metavar="N", help="link the worktrees to a GitHub issue (orca backend)")
+    n.add_argument("--prompt", metavar="TEXT", help="initial prompt for the agent")
     n.add_argument("--no-launch", action="store_true", help="create the worktrees, don't start the agent")
     n.set_defaults(fn=cmd_new)
 
     lk = sub.add_parser("link", help="existing worktrees: launch the agent across them")
     lk.add_argument("branch", nargs="?", help="default: the branch of the current directory")
     lk.add_argument("--host", metavar="REPO", help="repo that hosts the agent (default: first in config)")
+    lk.add_argument("--agent", metavar="NAME", help="agent for this run, overriding the config")
+    lk.add_argument("--prompt", metavar="TEXT", help="initial prompt for the agent")
     lk.set_defaults(fn=cmd_link)
 
     pa = sub.add_parser("paths", help="print the sibling worktree paths (no side effects)")
@@ -596,6 +656,9 @@ def build_parser() -> argparse.ArgumentParser:
     rm.add_argument("branch")
     rm.add_argument("--force", action="store_true", help="delete the branch even if unmerged")
     rm.set_defaults(fn=cmd_rm)
+
+    li = sub.add_parser("list", help="show your feature sets: branches with a worktree in 2+ repos")
+    li.set_defaults(fn=cmd_list)
 
     ls = sub.add_parser("ls", help="show the resolved config")
     ls.set_defaults(fn=cmd_ls)

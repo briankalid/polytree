@@ -81,6 +81,7 @@ git push -u origin <branch>
 | Command | What it does |
 |---|---|
 | `polytree new <name>` | Create a worktree on branch `<name>` in **every** repo, then launch the agent. If any repo fails, everything is rolled back — you never get half a set |
+| `polytree list` | Your feature sets: every branch with a worktree in 2+ repos, and whether each is clean or dirty |
 | `polytree link [branch]` | Existing worktrees: find the siblings and launch the agent. No branch = the one you're standing in |
 | `polytree rm <branch>` | Remove the worktree set. Checks every repo first and removes nothing if any worktree is dirty, locked, or has populated submodules. `--force` overrides all three and deletes the branch even if unmerged. The main checkout is never removed |
 | `polytree paths [branch]` | Print the sibling worktree paths. No side effects |
@@ -93,6 +94,24 @@ polytree new hotfix-payments --base origin/master   # config still says origin/d
 ```
 
 `--base` applies the same ref to every repo, so it wants a name they share (`master`, `main`). If a repo doesn't have it, polytree says which one and creates nothing.
+
+Reviewing a branch someone else pushed? It already exists, so `new` would refuse — use `--existing` to check it out into a worktree set instead of creating a branch:
+
+```bash
+polytree new their-feature --existing
+```
+
+Both also take `--agent <name>` to override the configured agent for one run, and `--prompt "..."` to hand the agent its task on startup. On the orca backend, `new --issue <n>` links the worktrees to a GitHub issue.
+
+### new, new --existing, or link?
+
+| The branch… | The worktrees… | Use |
+|---|---|---|
+| doesn't exist | — | `polytree new <branch>` |
+| exists (someone's PR) | don't exist yet | `polytree new <branch> --existing` |
+| exists | exist | `polytree link <branch>` |
+
+`link` never creates anything; it only attaches the agent to worktrees that are already there.
 
 ## What your agent actually picks up
 
