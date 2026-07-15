@@ -218,6 +218,38 @@ class TestRm(Base):
         self.assertNotIn("gone", pt.worktrees_of(str(self.web)))
         self.assertEqual(git(self.api, "branch", "--list", "gone").strip(), "")
 
+    def test_backend_deleting_the_branch_does_not_lose_unmerged_work(self):
+        """`orca worktree rm` deletes the branch too, merged or not. Without
+        --force the branch must survive anyway, and the report must not claim
+        'kept' when it is gone (or vice versa)."""
+        cfg = self.write_config()
+        self.new(cfg, "keepme")
+        wt = pt.worktrees_of(str(self.api))["keepme"]
+        git(wt, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "unmerged work")
+        sha = git(self.api, "rev-parse", "refs/heads/keepme").strip()
+
+        real = pt.remove_worktree
+
+        def orca_like(c, repo, path, force):  # simulate: worktree AND branch gone
+            real(c, repo, path, force)
+            git(repo["path"], "branch", "-D", "keepme", check=False)
+
+        pt.remove_worktree = orca_like
+        self.addCleanup(lambda: setattr(pt, "remove_worktree", real))
+        pt.cmd_rm(cfg, argparse.Namespace(branch="keepme", force=False))
+
+        self.assertNotIn("keepme", pt.worktrees_of(str(self.api)))  # worktree gone
+        self.assertTrue(pt.branch_exists(cfg["repos"][0], "keepme"))  # unmerged branch restored
+        self.assertEqual(git(self.api, "rev-parse", "refs/heads/keepme").strip(), sha)  # same commit
+
+    def test_rm_force_still_deletes_the_branch(self):
+        cfg = self.write_config()
+        self.new(cfg, "bye")
+        git(pt.worktrees_of(str(self.api))["bye"], "-c", "user.email=t@t", "-c", "user.name=t",
+            "commit", "-q", "--allow-empty", "-m", "unmerged")
+        pt.cmd_rm(cfg, argparse.Namespace(branch="bye", force=True))
+        self.assertFalse(pt.branch_exists(cfg["repos"][0], "bye"))
+
     def test_rm_unknown_branch_fails(self):
         cfg = self.write_config()
         with self.assertRaises(pt.Fail):

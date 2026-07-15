@@ -221,6 +221,10 @@ def is_locked(repo: str, path: str) -> bool:
     return any("locked" in r for r in worktree_records(repo) if r["worktree"] == path)
 
 
+def branch_exists(repo: dict, branch: str) -> bool:
+    return git_ok(repo["path"], "show-ref", "--verify", "--quiet", f"refs/heads/{branch}")
+
+
 def sibling_map(cfg: dict, branch: str) -> list[tuple[dict, str | None]]:
     """(repo, worktree path or None) for every configured repo, host first."""
     return [(r, worktrees_of(r["path"]).get(branch)) for r in cfg["repos"]]
@@ -504,7 +508,12 @@ def cmd_rm(cfg: dict, a: argparse.Namespace) -> None:
         die(f"cannot remove: {detail} — nothing was removed.{hint}")
 
     done: list[str] = []
+    kept: list[dict] = []
     for repo, path in present:
+        # `orca worktree rm` deletes the branch too, merged or not. Remember where
+        # it pointed so the keep-or-delete decision stays ours and identical on
+        # both backends, instead of Orca quietly discarding unmerged work.
+        sha = git(repo["path"], "rev-parse", "--verify", f"refs/heads/{a.branch}", check=False).strip()
         try:
             remove_worktree(cfg, repo, path, force=a.force)
         except Fail as e:
@@ -514,10 +523,22 @@ def cmd_rm(cfg: dict, a: argparse.Namespace) -> None:
                 f"{e}\n\nAlready removed: {', '.join(done) or 'nothing'}. "
                 f"Remaining repos untouched.\nRe-run with --force, or clean up by hand."
             )
-        deleted = git_ok(repo["path"], "branch", "-D" if a.force else "-d", a.branch)
-        note = "" if deleted else "  (branch kept: not merged — use --force)"
+        if sha and not branch_exists(repo, a.branch):
+            git(repo["path"], "branch", a.branch, sha, check=False)  # restore, then decide
+        git_ok(repo["path"], "branch", "-D" if a.force else "-d", a.branch)
+        # Report what is actually true now, not what the delete's exit code implied.
+        if branch_exists(repo, a.branch):
+            kept.append(repo)
+        note = "  (branch kept: not merged)" if repo in kept else ""
         info(f"  {repo['name']:<20} removed {path}{note}")
         done.append(repo["name"])
+
+    if kept:
+        # Not "re-run with --force": the worktrees are gone now, so `rm` would only
+        # say it found nothing. Give the command that actually works.
+        info(f"\nKept unmerged branch {a.branch!r}. To delete it anyway:")
+        for repo in kept:
+            info(f"  git -C {repo['path']} branch -D {a.branch}")
 
 
 def cmd_ls(cfg: dict, _a: argparse.Namespace) -> None:
