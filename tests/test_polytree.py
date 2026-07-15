@@ -269,6 +269,28 @@ class TestLockedWorktrees(Base):
         pt.cmd_rm(cfg, argparse.Namespace(branch="lk2", force=True))
         self.assertNotIn("lk2", pt.worktrees_of(str(self.web)))
 
+    def test_rm_refuses_populated_submodules_and_removes_nothing(self):
+        """git refuses worktrees with populated submodules even when clean, and
+        `status --porcelain` shows nothing — the case that slipped three times."""
+        sub = make_repo(self.tmp / "repos" / "sub")
+        git(
+            self.web, "-c", "protocol.file.allow=always", "-c", "user.email=t@t",
+            "-c", "user.name=t", "submodule", "add", "-q", str(sub), "vendor",
+        )
+        git(self.web, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "add submodule")
+        cfg = self.write_config()
+        self.new(cfg, "sm")
+        wt = pt.worktrees_of(str(self.web))["sm"]
+        git(wt, "-c", "protocol.file.allow=always", "submodule", "update", "-q", "--init")
+        self.assertTrue(pt.has_populated_submodules(wt))
+        self.assertFalse(pt.is_dirty(wt))  # clean: is_dirty would never catch this
+
+        with self.assertRaises(pt.Fail) as e:
+            pt.cmd_rm(cfg, argparse.Namespace(branch="sm", force=False))
+        self.assertIn("populated submodules", str(e.exception))
+        self.assertIn("sm", pt.worktrees_of(str(self.api)))  # api NOT half-removed
+        self.assertIn("sm", pt.worktrees_of(str(self.web)))
+
     def test_rm_never_touches_main_checkout(self):
         cfg = self.write_config()
         with self.assertRaises(pt.Fail) as e:
@@ -296,6 +318,7 @@ class TestRollbackOnInterrupt(Base):
             self.new(cfg, "irq")
         self.assertEqual(calls, ["api"])
         self.assertNotIn("irq", pt.worktrees_of(str(self.api)))  # rolled back
+        self.assertEqual(git(self.api, "branch", "--list", "irq").strip(), "")  # branch too
 
 
 class TestLink(Base):

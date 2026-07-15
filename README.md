@@ -68,7 +68,7 @@ Each repo's directory name must be unique — it's the folder name under `<root>
 |---|---|
 | `polytree new <name>` | Create a worktree on branch `<name>` in **every** repo, then launch the agent. If any repo fails, everything is rolled back — you never get half a set |
 | `polytree link [branch]` | Existing worktrees: find the siblings and launch the agent. No branch = the one you're standing in |
-| `polytree rm <branch>` | Remove the worktree set. Refuses — and removes nothing — if any worktree has uncommitted changes or is locked. `--force` discards those changes and deletes the branch even if unmerged. The main checkout is never removed |
+| `polytree rm <branch>` | Remove the worktree set. Checks every repo first and removes nothing if any worktree is dirty, locked, or has populated submodules. `--force` overrides all three and deletes the branch even if unmerged. The main checkout is never removed |
 | `polytree paths [branch]` | Print the sibling worktree paths. No side effects |
 | `polytree ls` | Show the resolved config (backend, agent, repos) |
 
@@ -130,7 +130,7 @@ The one thing no wrapper can fix: an agent that can't accept multiple roots at a
 python3 -m unittest discover -s tests
 ```
 
-They cover the failure modes rather than the happy path: partial-failure rollback, re-runs, detached/prunable/newline worktrees, and config validation.
+They cover the failure modes rather than the happy path: partial-failure rollback, Ctrl-C mid-create, re-runs, dirty/locked/submodule refusals, detached/prunable/newline worktrees, and config validation.
 
 ## License
 

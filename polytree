@@ -313,26 +313,43 @@ def is_dirty(worktree: str) -> bool:
     return bool(p.stdout.strip())
 
 
-def removal_blocker(repo: dict, path: str, force: bool) -> str | None:
-    """Why `path` must not be removed, or None. Mirrors what git itself refuses.
+def has_populated_submodules(worktree: str) -> bool:
+    """git refuses to remove a worktree with populated submodules, even a clean
+    one — and `status --porcelain` says nothing about it."""
+    p = subprocess.run(["git", "-C", worktree, "submodule", "status"], capture_output=True, text=True)
+    if p.returncode != 0:
+        return False
+    # "-<sha>" means registered but not populated; anything else is populated.
+    return any(line and not line.startswith("-") for line in p.stdout.splitlines())
 
-    Checked up front for every repo so a removal can never do half the set.
+
+def removal_blocker(repo: dict, path: str, force: bool) -> str | None:
+    """Why `path` must not be removed, or None.
+
+    Covers the conditions git refuses on: the main checkout, locked worktrees,
+    uncommitted changes, and populated submodules. This list is an approximation
+    of git's rules, not a contract — so cmd_rm also reports honestly if a removal
+    fails anyway, rather than trusting this to be exhaustive.
     """
     if path == repo["path"]:
         return "is the main checkout"  # git refuses this even with --force
     if force:
-        return None  # `remove --force --force` handles both locked and dirty
+        return None  # `remove --force --force` handles locked, dirty and submodules
     if is_locked(repo["path"], path):
         return "is locked"
     if is_dirty(path):
         return "has uncommitted changes"
+    if has_populated_submodules(path):
+        return "contains populated submodules"
     return None
 
 
 def remove_worktree(cfg: dict, repo: dict, path: str, force: bool) -> None:
     """Remove one worktree, and say so honestly if it did not work."""
     if cfg["backend"] == "orca":
-        run([orca_bin(), "worktree", "rm", "--worktree", f"path:{path}", "--force", "--json"], check=False)
+        # Only force Orca when the user asked: don't bypass its own safeguards.
+        flags = ["--force"] if force else []
+        run([orca_bin(), "worktree", "rm", "--worktree", f"path:{path}", *flags, "--json"], check=False)
     if Path(path).exists():  # Orca may have removed it already
         # Doubled --force is what git requires to remove a locked worktree.
         flags = ["--force", "--force"] if force else []
@@ -481,11 +498,21 @@ def cmd_rm(cfg: dict, a: argparse.Namespace) -> None:
         hint = "" if a.force else "\nCommit or stash them, or re-run with --force to discard them."
         die(f"cannot remove: {detail} — nothing was removed.{hint}")
 
+    done: list[str] = []
     for repo, path in present:
-        remove_worktree(cfg, repo, path, force=a.force)  # raises if it fails
+        try:
+            remove_worktree(cfg, repo, path, force=a.force)
+        except Fail as e:
+            # removal_blocker approximates git's rules; if git refuses anyway, say
+            # exactly what happened instead of leaving the user to guess.
+            die(
+                f"{e}\n\nAlready removed: {', '.join(done) or 'nothing'}. "
+                f"Remaining repos untouched.\nRe-run with --force, or clean up by hand."
+            )
         deleted = git_ok(repo["path"], "branch", "-D" if a.force else "-d", a.branch)
         note = "" if deleted else "  (branch kept: not merged — use --force)"
         info(f"  {repo['name']:<20} removed {path}{note}")
+        done.append(repo["name"])
 
 
 def cmd_ls(cfg: dict, _a: argparse.Namespace) -> None:
