@@ -87,6 +87,53 @@ class TestWorktreeParsing(Base):
         self.assertEqual(pt.worktrees_of(str(self.api))["sp"], str(wt))
 
 
+class TestRealBranchShapes(Base):
+    """Every branch name in this suite used to be lowercase and slash-free, which
+    is not what real repos look like. These are the shapes from the repos polytree
+    was built against: Msf/merge-in-to-dev, chore/add_new_builtins, ReginaRRJ-new_uma.
+    Two bugs hid in the gap between those and 'feat'.
+    """
+
+    SHAPES = [
+        "Msf/merge-in-to-dev",  # capital + slash
+        "chore/add_new_builtins",  # underscore + slash
+        "ReginaRRJ-new_uma",  # capitals, no slash
+        "feature/proposal-auto_load_swagger",  # the long real one
+        "release/v1.2.3",  # dots
+        "feat/a/b/c",  # nested slashes
+    ]
+
+    def test_new_list_and_rm_survive_every_shape(self):
+        cfg = self.write_config()
+        for name in self.SHAPES:
+            with self.subTest(branch=name):
+                self.new(cfg, name)
+                self.assertIn(name, pt.worktrees_of(str(self.api)), f"{name} not created")
+                self.assertIn(name, pt.worktrees_of(str(self.web)))
+                # discovery must find it under the exact name asked for
+                self.assertEqual(
+                    [p for _, p in pt.sibling_map(cfg, name) if p],
+                    [pt.worktrees_of(str(r))[name] for r in (self.api, self.web)],
+                )
+                pt.cmd_rm(cfg, argparse.Namespace(branch=name, force=True))
+                self.assertNotIn(name, pt.worktrees_of(str(self.api)))
+
+    def test_nested_slashes_do_not_strand_directories(self):
+        """<root>/feat/a/b/c/<repo> is four levels deep; cleanup has to unwind it."""
+        cfg = self.write_config()
+        self.new(cfg, "feat/a/b/c")
+        pt.cmd_rm(cfg, argparse.Namespace(branch="feat/a/b/c", force=True))
+        self.assertFalse((self.tmp / "wt" / "feat").exists(), "empty shell left behind")
+
+    def test_case_differing_branches_are_not_confused(self):
+        """On a case-insensitive filesystem these would collide; on Linux they
+        are two branches and must stay two."""
+        cfg = self.write_config()
+        self.new(cfg, "Feature/X")
+        self.assertIn("Feature/X", pt.worktrees_of(str(self.api)))
+        self.assertNotIn("feature/x", pt.worktrees_of(str(self.api)))
+
+
 class TestBuildArgv(Base):
     def test_cmd_key_and_attach(self):
         cfg = self.write_config()
@@ -947,6 +994,170 @@ class TestOrcaLeak(Base):
             self.assertIn("zz", pt.local_branches(repo))  # their branch untouched
             self.assertNotIn("zz/x", pt.local_branches(repo))
             self.assertEqual([w for w in pt.worktrees_of(repo["path"]) if "zz" in w], [])
+
+
+class TestBrokenWorldRecovery(Base):
+    """State polytree did not create and cannot prevent: someone rm -rf'd a
+    worktree, or git is in a shape the tool never made. It has to cope, not crash."""
+
+    def test_link_after_a_worktree_was_deleted_by_hand(self):
+        cfg = self.write_config()
+        self.new(cfg, "halfgone")
+        subprocess.run(["rm", "-rf", pt.worktrees_of(str(self.web))["halfgone"]])
+        # git still lists it (prunable) but it is gone: link must say so, not launch
+        with self.assertRaises(pt.Fail) as e:
+            pt.cmd_link(cfg, argparse.Namespace(branch="halfgone", host=None, agent=None, prompt=None))
+        self.assertIn("need >=2", str(e.exception))
+
+    def test_list_ignores_a_worktree_deleted_by_hand(self):
+        cfg = self.write_config()
+        self.new(cfg, "halfgone")
+        subprocess.run(["rm", "-rf", pt.worktrees_of(str(self.web))["halfgone"]])
+        out = []
+        real = pt.info
+        self.addCleanup(lambda: setattr(pt, "info", real))
+        pt.info = out.append
+        pt.cmd_list(cfg, argparse.Namespace())
+        self.assertNotIn("halfgone", "\n".join(out))  # 1 repo left is not a set
+
+    def test_rm_after_a_worktree_was_deleted_by_hand(self):
+        """The set is half gone; rm must clean the rest rather than refuse."""
+        cfg = self.write_config()
+        self.new(cfg, "halfgone")
+        subprocess.run(["rm", "-rf", pt.worktrees_of(str(self.api))["halfgone"]])
+        pt.cmd_rm(cfg, argparse.Namespace(branch="halfgone", force=True))
+        self.assertNotIn("halfgone", pt.worktrees_of(str(self.web)))
+
+    def test_new_when_the_destination_is_occupied_by_a_stray_directory(self):
+        cfg = self.write_config()
+        dest = Path(cfg["root"]) / "squatter" / "api"
+        dest.mkdir(parents=True)
+        (dest / "junk.txt").write_text("not a worktree")
+        with self.assertRaises(pt.Fail) as e:
+            self.new(cfg, "squatter")
+        self.assertIn("already exists", str(e.exception))
+        self.assertNotIn("squatter", pt.local_branches(cfg["repos"][0]))  # nothing created
+
+    def test_prune_empty_dirs_never_eats_a_directory_with_content(self):
+        """Today rmdir refuses non-empty dirs, so the guard is belt-and-braces —
+        but this pins the property against the tempting refactor to rmtree."""
+        cfg = self.write_config()
+        self.new(cfg, "keepdir")
+        sibling = Path(cfg["root"]) / "keepdir" / "something-of-mine"
+        sibling.mkdir()
+        (sibling / "file.txt").write_text("mine")
+        pt.cmd_rm(cfg, argparse.Namespace(branch="keepdir", force=True))
+        self.assertTrue(sibling.exists(), "cleanup deleted a directory it did not create")
+
+
+class TestBaseResolution(Base):
+    def test_base_can_be_a_sha(self):
+        cfg = self.write_config()
+        git(self.api, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q",
+            "--allow-empty", "-m", "second")
+        sha = git(self.api, "rev-parse", "HEAD~1").strip()
+        for r in (self.api, self.web):
+            git(r, "tag", "v1", "main")
+        self.new(cfg, "from-tag", base="v1")
+        self.assertIn("from-tag", pt.worktrees_of(str(self.api)))
+
+    def test_default_base_without_any_remote_uses_the_local_head(self):
+        self.assertEqual(pt.default_base({"path": str(self.api), "name": "api"}), "main")
+
+    def test_a_repo_with_no_commits_fails_in_the_preflight_not_halfway(self):
+        """`git symbolic-ref --short HEAD` names the default branch even before
+        the first commit, so default_base rightly answers 'main'. The base having
+        no commit yet is the preflight's job to catch — and it must catch it
+        before anything is created, not after the first repo."""
+        empty_a, empty_b = self.tmp / "ea", self.tmp / "eb"
+        for p in (empty_a, empty_b):
+            p.mkdir()
+            git(p, "init", "-q", "-b", "main")
+        cfg_file = self.tmp / "empty.toml"
+        cfg_file.write_text(
+            f'backend = "git"\nagent = "fake"\nroot = "{self.tmp}/wte"\n\n'
+            f'[[repos]]\npath = "{empty_a}"\nhost = true\n\n[[repos]]\npath = "{empty_b}"\n\n'
+            f'[agents.fake]\ncmd = "true"\nattach = "--add-dir {{dir}}"\n'
+        )
+        pt.CONFIG = cfg_file
+        cfg = pt.load_config()
+        self.assertEqual(pt.default_base(cfg["repos"][0]), "main")  # names it, correctly
+        with self.assertRaises(pt.Fail) as e:
+            self.new(cfg, "x")
+        self.assertIn("does not exist", str(e.exception))
+        self.assertIn("nothing was created", str(e.exception))
+        self.assertFalse((self.tmp / "wte").exists())
+
+
+class TestConfigIsHostile(Base):
+    def _cfg(self, text):
+        p = self.tmp / "hostile.toml"
+        p.write_text(text)
+        pt.CONFIG = p
+        return p
+
+    def test_broken_toml(self):
+        self._cfg('backend = "git"\n[[repos]\npath = "/x"\n')
+        with self.assertRaises(pt.Fail) as e:
+            pt.load_config()
+        self.assertIn("invalid TOML", str(e.exception))
+
+    def test_one_repo_is_not_a_set(self):
+        self._cfg(f'backend = "git"\n[[repos]]\npath = "{self.api}"\n')
+        with self.assertRaises(pt.Fail) as e:
+            pt.load_config()
+        self.assertIn("at least 2", str(e.exception))
+
+    def test_repo_path_that_is_not_a_git_repo(self):
+        plain = self.tmp / "plain"
+        plain.mkdir()
+        self._cfg(f'backend = "git"\n[[repos]]\npath = "{self.api}"\n\n[[repos]]\npath = "{plain}"\n')
+        with self.assertRaises(pt.Fail) as e:
+            pt.load_config()
+        self.assertIn("not a git repo", str(e.exception))
+
+    def test_repo_path_that_does_not_exist(self):
+        self._cfg(f'backend = "git"\n[[repos]]\npath = "{self.api}"\n\n[[repos]]\npath = "/nope/zzz"\n')
+        with self.assertRaises(pt.Fail) as e:
+            pt.load_config()
+        self.assertIn("does not exist", str(e.exception))
+
+    def test_invalid_backend(self):
+        self._cfg(f'backend = "svn"\n[[repos]]\npath = "{self.api}"\n\n[[repos]]\npath = "{self.web}"\n')
+        with self.assertRaises(pt.Fail) as e:
+            pt.load_config()
+        self.assertIn("invalid backend", str(e.exception))
+
+    def test_two_hosts(self):
+        self._cfg(
+            f'backend = "git"\n[[repos]]\npath = "{self.api}"\nhost = true\n\n'
+            f'[[repos]]\npath = "{self.web}"\nhost = true\n'
+        )
+        with self.assertRaises(pt.Fail) as e:
+            pt.load_config()
+        self.assertIn("only one", str(e.exception))
+
+    def test_repo_name_that_escapes_the_root(self):
+        self._cfg(
+            f'backend = "git"\n[[repos]]\npath = "{self.api}"\nname = "../evil"\n\n'
+            f'[[repos]]\npath = "{self.web}"\n'
+        )
+        with self.assertRaises(pt.Fail) as e:
+            pt.load_config()
+        self.assertIn("invalid repo name", str(e.exception))
+
+    def test_agent_without_attach(self):
+        cfg = self.write_config(extra="\n[agents.broken]\ncmd = \"true\"\n")
+        cfg["agent"] = "broken"
+        with self.assertRaises(pt.Fail) as e:
+            pt.resolve_agent(cfg)
+        self.assertIn("needs `attach`", str(e.exception))
+
+    def test_agent_with_an_invalid_env_var_name(self):
+        cfg = self.write_config(extra='env = { "not a var" = "1" }\n')
+        with self.assertRaises(pt.Fail) as e:
+            pt.resolve_agent(cfg)
+        self.assertIn("invalid env var name", str(e.exception))
 
 
 class TestPickHost(Base):
