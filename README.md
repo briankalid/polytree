@@ -60,7 +60,7 @@ Each repo's directory name must be unique — it's the folder name under `<root>
 |---|---|
 | `polytree new <name>` | Create a worktree on branch `<name>` in **every** repo, then launch the agent. If any repo fails, everything is rolled back — you never get half a set |
 | `polytree link [branch]` | Existing worktrees: find the siblings and launch the agent. No branch = the one you're standing in |
-| `polytree rm <branch>` | Remove the worktree set. `--force` also deletes an unmerged branch |
+| `polytree rm <branch>` | Remove the worktree set. Refuses if any worktree has uncommitted changes (and removes nothing). `--force` discards those changes and deletes the branch even if unmerged |
 | `polytree paths [branch]` | Print the sibling worktree paths. No side effects |
 | `polytree ls` | Show the resolved config (backend, agent, repos) |
 

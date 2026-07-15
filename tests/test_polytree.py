@@ -199,6 +199,35 @@ class TestRm(Base):
         with self.assertRaises(pt.Fail):
             pt.cmd_rm(cfg, argparse.Namespace(branch="never", force=False))
 
+    def test_rm_refuses_to_destroy_uncommitted_work(self):
+        """Without --force, git refuses to remove a dirty worktree. Don't override that."""
+        cfg = self.write_config()
+        self.new(cfg, "wip")
+        wt = pt.worktrees_of(str(self.api))["wip"]
+        (Path(wt) / "IMPORTANT.txt").write_text("uncommitted work")
+        with self.assertRaises(pt.Fail) as e:
+            pt.cmd_rm(cfg, argparse.Namespace(branch="wip", force=False))
+        self.assertIn("uncommitted changes", str(e.exception))
+        self.assertTrue((Path(wt) / "IMPORTANT.txt").exists())  # survived
+        self.assertIn("wip", pt.worktrees_of(str(self.api)))
+
+    def test_rm_preflight_leaves_nothing_half_removed(self):
+        """web is dirty -> api must NOT be removed first."""
+        cfg = self.write_config()
+        self.new(cfg, "half")
+        (Path(pt.worktrees_of(str(self.web))["half"]) / "dirty.txt").write_text("x")
+        with self.assertRaises(pt.Fail):
+            pt.cmd_rm(cfg, argparse.Namespace(branch="half", force=False))
+        self.assertIn("half", pt.worktrees_of(str(self.api)))  # untouched
+        self.assertIn("half", pt.worktrees_of(str(self.web)))
+
+    def test_rm_force_does_discard(self):
+        cfg = self.write_config()
+        self.new(cfg, "nuke")
+        (Path(pt.worktrees_of(str(self.api))["nuke"]) / "dirty.txt").write_text("x")
+        pt.cmd_rm(cfg, argparse.Namespace(branch="nuke", force=True))
+        self.assertNotIn("nuke", pt.worktrees_of(str(self.api)))
+
 
 class TestPickHost(Base):
     def test_default_is_config_order(self):

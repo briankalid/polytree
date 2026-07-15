@@ -275,7 +275,24 @@ def create_orca(repo: dict, branch: str) -> str:
     return path
 
 
-def remove_worktree(cfg: dict, repo: dict, path: str) -> None:
+def is_dirty(worktree: str) -> bool:
+    p = subprocess.run(["git", "-C", worktree, "status", "--porcelain"], capture_output=True, text=True)
+    return bool(p.stdout.strip())
+
+
+def remove_worktree(cfg: dict, repo: dict, path: str, force: bool) -> None:
+    """Remove one worktree.
+
+    Without `force`, plain `git worktree remove` is used: it refuses to delete a
+    dirty worktree, and that refusal is a feature we must not paper over.
+    """
+    if not force:
+        p = subprocess.run(["git", "-C", repo["path"], "worktree", "remove", path], capture_output=True, text=True)
+        if p.returncode != 0:
+            die(f"{repo['name']}: refusing to remove {path}\n{p.stderr.strip()}")
+        git(repo["path"], "worktree", "prune", check=False)
+        return
+
     if cfg["backend"] == "orca":
         run([orca_bin(), "worktree", "rm", "--worktree", f"path:{path}", "--force", "--json"], check=False)
     if Path(path).exists():  # Orca may have removed it already
@@ -284,8 +301,9 @@ def remove_worktree(cfg: dict, repo: dict, path: str) -> None:
 
 
 def rollback(cfg: dict, created: list[tuple[dict, str]], branch: str) -> None:
+    # force=True is safe here: these worktrees were created seconds ago by us.
     for repo, path in reversed(created):
-        remove_worktree(cfg, repo, path)
+        remove_worktree(cfg, repo, path, force=True)
         git(repo["path"], "branch", "-D", branch, check=False)
 
 
@@ -383,8 +401,16 @@ def cmd_rm(cfg: dict, a: argparse.Namespace) -> None:
     present = [(r, p) for r, p in sibling_map(cfg, a.branch) if p]
     if not present:
         die(f"no worktrees found for branch {a.branch!r}")
+
+    if not a.force:  # preflight: don't remove repo 1 and then bail on repo 2
+        dirty = [r["name"] for r, p in present if is_dirty(p)]
+        if dirty:
+            die(
+                f"uncommitted changes in: {', '.join(dirty)} — nothing was removed.\n"
+                f"Commit or stash them, or re-run with --force to discard them."
+            )
     for repo, path in present:
-        remove_worktree(cfg, repo, path)
+        remove_worktree(cfg, repo, path, force=a.force)
         deleted = git_ok(repo["path"], "branch", "-D" if a.force else "-d", a.branch)
         note = "" if deleted else "  (branch kept: not merged — use --force)"
         info(f"  {repo['name']:<20} removed {path}{note}")
