@@ -103,7 +103,7 @@ polytree new their-feature --existing
 
 Pass the plain branch name, not `origin/their-feature`: polytree fetches first, and a branch that only exists on the remote is checked out into a local one for you.
 
-Or point at the pull request and let polytree find the branch (needs [`gh`](https://cli.github.com/)):
+Or point at the pull request and let polytree find the branch (needs [`gh`](https://cli.github.com/)). The PR's branch has to be on `origin` — a PR from a fork is not supported yet, and polytree says so rather than inventing an empty branch:
 
 ```bash
 polytree new --pr 378              # the PR in the host repo
@@ -151,6 +151,8 @@ The practical takeaway: **hooks and settings only ever come from the host repo.*
 - **`orca`** — creates worktrees through [Orca](https://www.onorca.dev/) and launches the agent in an Orca-managed terminal, so the whole set shows up in the app.
 
 Two things the Orca CLI does that polytree corrects, so both backends behave the same: it slugifies the name it is given into the branch (`feature/x` becomes `feature-x`), and it cannot check out an existing branch — it always creates a new one off the base. polytree renames the branch back to what you asked for, and for `--existing` puts the worktree on the real branch. Orca picks both up; only its directory name stays slugified.
+
+If the slug lands on a branch that already exists, Orca reuses that branch — renaming it would take someone's work, so polytree refuses and tells you which branch is in the way. Asking for `feature/x` while a `feature-x` branch exists is the case to know about.
 
 Discovery is always plain git, so `polytree link`, `paths` and `rm` work on worktrees created by either backend. (With the `orca` backend the *launch* goes through Orca, so the host worktree does need to be one Orca knows about.)
 

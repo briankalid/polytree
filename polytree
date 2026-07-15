@@ -364,25 +364,35 @@ def create_orca(cfg: dict, repo: dict, branch: str, override: str | None = None,
     path, made = fresh[0]["worktree"], fresh[0].get("branch", "").removeprefix("refs/heads/")
     ours = bool(made) and made not in branches_before  # did Orca invent this branch?
 
-    if existing:
-        # Orca cannot check an existing branch out: it always makes a new one off
-        # the base, which would silently hand you an empty branch instead of the
-        # work you meant to review. Put the worktree on the right branch ourselves.
-        git(path, "checkout", branch)  # DWIMs a local branch from origin/<branch>
+    # Everything below can fail (a rename can hit a refs D/F conflict; a checkout
+    # can be ambiguous). Orca's worktree already exists by now, and the caller's
+    # rollback cannot see it yet — so clean up here or it leaks and the "rolled
+    # back N" line becomes a lie.
+    try:
+        if existing:
+            # Orca cannot check an existing branch out: it always makes a new one
+            # off the base, which would silently hand you an empty branch instead
+            # of the work you meant to review. Put it on the right branch.
+            git(path, "checkout", branch)  # DWIMs a local branch from origin/<branch>
+            if ours:
+                git(repo["path"], "branch", "-D", made, check=False)  # Orca's throwaway
+        elif made and made != branch:
+            if not ours:
+                # Orca slugified our name onto a branch that already existed and
+                # reused it. Renaming would quietly steal someone's branch.
+                die(
+                    f"Orca turns the name {branch!r} into the branch {made!r}, which already "
+                    f"exists in {repo['name']}, and reused it instead of making a new one.\n"
+                    f"Rename or delete {made!r}, or pick another name."
+                )
+            git(repo["path"], "branch", "-m", made, branch)  # undo the slugification
+    except BaseException:
         if ours:
-            git(repo["path"], "branch", "-D", made, check=False)  # drop Orca's throwaway
-    elif made and made != branch:
-        if not ours:
-            # Orca slugified our name onto a branch that already existed and reused
-            # it. Renaming would quietly steal someone's branch, so refuse — and
-            # take back only the worktree, never their branch.
+            remove_worktree(cfg, repo, path, force=True)
+            git(repo["path"], "branch", "-D", made, check=False)
+        else:
             remove_worktree_keeping_branch(cfg, repo, path, made)
-            die(
-                f"Orca turns the name {branch!r} into the branch {made!r}, which already "
-                f"exists in {repo['name']}, and reused it instead of making a new one.\n"
-                f"Rename or delete {made!r}, or pick another name. Nothing was changed."
-            )
-        git(repo["path"], "branch", "-m", made, branch)  # undo the slugification
+        raise
     return path
 
 
@@ -475,14 +485,22 @@ def prune_empty_dirs(cfg: dict, path: str) -> None:
         pass
 
 
-def rollback(cfg: dict, created: list[tuple[dict, str]], branch: str) -> None:
-    """Best effort: never let a rollback failure mask the original error."""
+def rollback(cfg: dict, created: list[tuple[dict, str]], branch: str, ours: set[str]) -> None:
+    """Undo what we made. Best effort: never mask the original error.
+
+    `ours` names the repos where polytree created the branch. Everywhere else the
+    branch was already there — someone's work, `--existing`/`--pr` — and rolling
+    back must take the worktree without taking their branch with it.
+    """
     for repo, path in reversed(created):
         try:
-            remove_worktree(cfg, repo, path, force=True)  # safe: we made these seconds ago
+            if repo["name"] in ours:
+                remove_worktree(cfg, repo, path, force=True)  # safe: made seconds ago
+                git(repo["path"], "branch", "-D", branch, check=False)
+            else:
+                remove_worktree_keeping_branch(cfg, repo, path, branch)
         except Fail:
             pass
-        git(repo["path"], "branch", "-D", branch, check=False)
 
 
 # ------------------------------------------------------------------------ launch
@@ -537,13 +555,15 @@ def cmd_new(cfg: dict, a: argparse.Namespace) -> None:
 
     check_branch_name(branch)
     if a.existing and a.base:
-        die("--existing checks out a branch that already exists; --base has nothing to apply to")
+        flag = "--pr" if a.pr else "--existing"
+        die(f"{flag} checks out a branch that already exists; --base has nothing to apply to")
     if a.issue and cfg["backend"] != "orca":
         die("--issue links the worktree to an issue in Orca; it needs the orca backend")
     if a.agent:
         cfg["agent"] = a.agent
     spec = None if a.no_launch else resolve_agent(cfg)  # fail before touching disk
 
+    ours: set[str] = set()  # repos where the branch will be ours to delete on rollback
     for r in cfg["repos"]:  # preflight: never create half a set
         # Fetch before looking: --existing usually means a branch someone else
         # pushed, which is a remote ref until we ask. Also lets a base like
@@ -553,7 +573,15 @@ def cmd_new(cfg: dict, a: argparse.Namespace) -> None:
         # git checks out origin/<branch> into a new local branch on its own, so a
         # remote-only branch counts as existing.
         has_remote = git_ok(r["path"], "show-ref", "--verify", "--quiet", f"refs/remotes/origin/{branch}")
+        if not has_branch:
+            ours.add(r["name"])  # we are about to create it, so we may delete it
         if a.existing and not (has_branch or has_remote):
+            if a.pr:
+                die(
+                    f"the branch for PR {a.pr} ({branch!r}) is not on origin in {r['name']} — "
+                    f"nothing was created.\nIt most likely lives in a fork, which polytree "
+                    f"cannot fetch yet. Fetch the branch yourself, or review the PR from Orca."
+                )
             die(
                 f"branch {branch!r} exists neither locally nor on origin in {r['name']} — "
                 f"nothing was created.\nDrop --existing to create it."
@@ -583,10 +611,11 @@ def cmd_new(cfg: dict, a: argparse.Namespace) -> None:
             created.append((r, path))
             info(f"  {r['name']:<20} -> {path}")
     except Fail as e:
-        rollback(cfg, created, branch)
-        die(f"{e}\n\nRolled back the {len(created)} worktree(s) polytree had created.")
+        rollback(cfg, created, branch, ours)
+        tail = f"\n\nRolled back the {len(created)} worktree(s) polytree had created." if created else ""
+        die(f"{e}{tail}")
     except BaseException:  # Ctrl-C, OSError… a half-made set is still a half-made set
-        rollback(cfg, created, branch)
+        rollback(cfg, created, branch, ours)
         raise
 
     if a.no_launch:

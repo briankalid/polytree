@@ -724,11 +724,82 @@ class TestOrcaBackend(Base):
         with self.assertRaises(pt.Fail) as e:
             self.new(cfg, "zz/collide")
         self.assertIn("already exists", str(e.exception))
-        self.assertIn("Nothing was changed", str(e.exception))
         self.assertIn("zz-collide", pt.local_branches(cfg["repos"][0]))  # survived
         self.assertEqual(git(self.api, "rev-parse", "zz-collide").strip(), sha)  # untouched
         self.assertNotIn("zz/collide", pt.local_branches(cfg["repos"][0]))
         self.assertNotIn("zz-collide", pt.worktrees_of(str(self.api)))  # worktree taken back
+
+
+class TestRollbackNeverTakesSomeoneElsesBranch(Base):
+    """--existing/--pr work on branches polytree did not create. A partial
+    failure must take back the worktrees and nothing else."""
+
+    def test_rollback_keeps_a_preexisting_branch(self):
+        for r in (self.api, self.web):
+            git(r, "branch", "my-wip", "main")
+        git(self.api, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q",
+            "--allow-empty", "-m", "unpushed")  # work only on api's branch tip
+        git(self.api, "branch", "-f", "my-wip", "HEAD")
+        sha = git(self.api, "rev-parse", "my-wip").strip()
+
+        cfg = self.write_config()
+        real = pt.create_git
+
+        def boom(c, repo, branch, override=None, existing=False):
+            if repo["name"] == "web":
+                pt.die("simulated failure on the second repo")
+            return real(c, repo, branch, override, existing)
+
+        pt.create_git = boom
+        self.addCleanup(lambda: setattr(pt, "create_git", real))
+        with self.assertRaises(pt.Fail):
+            self.new(cfg, "my-wip", existing=True)
+
+        self.assertIn("my-wip", pt.local_branches(cfg["repos"][0]))  # survived
+        self.assertEqual(git(self.api, "rev-parse", "my-wip").strip(), sha)  # untouched
+        self.assertNotIn("my-wip", pt.worktrees_of(str(self.api)))  # worktree taken back
+
+    def test_rollback_does_delete_a_branch_we_created(self):
+        cfg = self.write_config()
+        real = pt.create_git
+
+        def boom(c, repo, branch, override=None, existing=False):
+            if repo["name"] == "web":
+                pt.die("simulated failure on the second repo")
+            return real(c, repo, branch, override, existing)
+
+        pt.create_git = boom
+        self.addCleanup(lambda: setattr(pt, "create_git", real))
+        with self.assertRaises(pt.Fail):
+            self.new(cfg, "ours-to-drop")
+        self.assertNotIn("ours-to-drop", pt.local_branches(cfg["repos"][0]))
+
+
+class TestOrcaLeak(Base):
+    """A failure after Orca's create is invisible to the caller's rollback, so
+    create_orca has to clean up after itself."""
+
+    def test_rename_hitting_a_refs_conflict_leaves_nothing_behind(self):
+        """A branch 'zz' exists, so git cannot create 'refs/heads/zz/x' — the
+        rename fails. Deterministic, not a race."""
+        for r in (self.api, self.web):
+            git(r, "branch", "zz", "main")
+        orca = TestOrcaBackend._fake_orca.__get__(self, TestOrcaBackend)
+        orca()
+        cfg_file = self.tmp / "orca.toml"
+        cfg_file.write_text(
+            f'backend = "orca"\nagent = "fake"\n\n[[repos]]\npath = "{self.api}"\nhost = true\n\n'
+            f'[[repos]]\npath = "{self.web}"\n\n[agents.fake]\ncmd = "true"\nattach = "--add-dir {{dir}}"\n'
+        )
+        pt.CONFIG = cfg_file
+        cfg = pt.load_config()
+        with self.assertRaises(pt.Fail):
+            self.new(cfg, "zz/x")
+        for repo in cfg["repos"]:
+            self.assertNotIn("zz-x", pt.local_branches(repo))  # no orphan slug branch
+            self.assertIn("zz", pt.local_branches(repo))  # their branch untouched
+            self.assertNotIn("zz/x", pt.local_branches(repo))
+            self.assertEqual([w for w in pt.worktrees_of(repo["path"]) if "zz" in w], [])
 
 
 class TestPickHost(Base):
