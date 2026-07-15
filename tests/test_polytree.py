@@ -665,6 +665,72 @@ class TestList(Base):
         self.assertRegex(text, r"api\s+clean")
 
 
+class TestOrcaBackend(Base):
+    """The orca backend had no coverage, which is how its worst bug survived.
+    Orca is stubbed here: the point is polytree's logic, not Orca's."""
+
+    def _fake_orca(self, reuses_existing_branch=False):
+        """Stand in for `orca worktree create`, slug and all.
+
+        Orca turns the name into a branch by replacing '/' with '-', and if that
+        branch already exists it checks it out instead of making a new one.
+        """
+        real_run, real_bin = pt.run, pt.orca_bin
+        self.addCleanup(lambda: (setattr(pt, "run", real_run), setattr(pt, "orca_bin", real_bin)))
+        pt.orca_bin = lambda: "fake-orca"
+
+        def fake(args, cwd=None, check=True):
+            if args and args[0] == "fake-orca" and "create" in args:
+                name = args[args.index("--name") + 1]
+                slug = name.replace("/", "-")
+                sel = args[args.index("--repo") + 1].removeprefix("path:")
+                dest = str(self.tmp / "orcawt" / Path(sel).name / slug)  # per-repo, like Orca
+                if reuses_existing_branch and slug in pt.local_branches({"path": sel}):
+                    git(sel, "worktree", "add", "-q", dest, slug)  # reuse, like Orca
+                else:
+                    git(sel, "worktree", "add", "-q", "-b", slug, dest, "main")
+                return "{}"
+            if args and args[0] == "fake-orca":  # rm and friends: let git do the work
+                return "{}"
+            return real_run(args, cwd=cwd, check=check)
+
+        pt.run = fake
+
+    def _orca_config(self):
+        cfg = self.tmp / "orca.toml"
+        cfg.write_text(
+            f'backend = "orca"\nagent = "fake"\n\n[[repos]]\npath = "{self.api}"\nhost = true\n\n'
+            f'[[repos]]\npath = "{self.web}"\n\n[agents.fake]\ncmd = "true"\nattach = "--add-dir {{dir}}"\n'
+        )
+        pt.CONFIG = cfg
+        return pt.load_config()
+
+    def test_slugified_branch_is_renamed_back(self):
+        """Orca makes 'feature-x'; the user asked for 'feature/x' and must get it."""
+        self._fake_orca()
+        cfg = self._orca_config()
+        self.new(cfg, "feature/x")
+        self.assertIn("feature/x", pt.worktrees_of(str(self.api)))
+        self.assertNotIn("feature-x", pt.local_branches(cfg["repos"][0]))  # no orphan slug
+
+    def test_refuses_to_steal_a_branch_the_slug_collides_with(self):
+        """'zz-collide' already exists and is someone's work. Asking for
+        'zz/collide' makes Orca reuse it — renaming it would be theft."""
+        for r in (self.api, self.web):
+            git(r, "branch", "zz-collide", "main")
+        sha = git(self.api, "rev-parse", "zz-collide").strip()
+        self._fake_orca(reuses_existing_branch=True)
+        cfg = self._orca_config()
+        with self.assertRaises(pt.Fail) as e:
+            self.new(cfg, "zz/collide")
+        self.assertIn("already exists", str(e.exception))
+        self.assertIn("Nothing was changed", str(e.exception))
+        self.assertIn("zz-collide", pt.local_branches(cfg["repos"][0]))  # survived
+        self.assertEqual(git(self.api, "rev-parse", "zz-collide").strip(), sha)  # untouched
+        self.assertNotIn("zz/collide", pt.local_branches(cfg["repos"][0]))
+        self.assertNotIn("zz-collide", pt.worktrees_of(str(self.api)))  # worktree taken back
+
+
 class TestPickHost(Base):
     def test_default_is_config_order(self):
         cfg = self.write_config()

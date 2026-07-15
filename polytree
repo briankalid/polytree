@@ -350,8 +350,10 @@ def create_orca(cfg: dict, repo: dict, branch: str, override: str | None = None,
 
     # Find the new worktree by diffing, not by looking up `branch`: Orca slugifies
     # --name into the branch it creates ("feature/x" -> "feature-x"), so the branch
-    # we asked for may not be the branch we get.
+    # we asked for may not be the branch we get. Snapshot branches too — we have to
+    # know whether Orca invented the branch or grabbed one that was already there.
     before = {r["worktree"] for r in worktree_records(repo["path"])}
+    branches_before = local_branches(repo)
     run(args)
     fresh = [r for r in worktree_records(repo["path"]) if r["worktree"] not in before]
     if len(fresh) != 1:
@@ -360,15 +362,26 @@ def create_orca(cfg: dict, repo: dict, branch: str, override: str | None = None,
             f"Check `orca worktree list`; polytree cannot tell which one is new."
         )
     path, made = fresh[0]["worktree"], fresh[0].get("branch", "").removeprefix("refs/heads/")
+    ours = bool(made) and made not in branches_before  # did Orca invent this branch?
 
     if existing:
         # Orca cannot check an existing branch out: it always makes a new one off
         # the base, which would silently hand you an empty branch instead of the
         # work you meant to review. Put the worktree on the right branch ourselves.
         git(path, "checkout", branch)  # DWIMs a local branch from origin/<branch>
-        if made and made != branch:
+        if ours:
             git(repo["path"], "branch", "-D", made, check=False)  # drop Orca's throwaway
     elif made and made != branch:
+        if not ours:
+            # Orca slugified our name onto a branch that already existed and reused
+            # it. Renaming would quietly steal someone's branch, so refuse — and
+            # take back only the worktree, never their branch.
+            remove_worktree_keeping_branch(cfg, repo, path, made)
+            die(
+                f"Orca turns the name {branch!r} into the branch {made!r}, which already "
+                f"exists in {repo['name']}, and reused it instead of making a new one.\n"
+                f"Rename or delete {made!r}, or pick another name. Nothing was changed."
+            )
         git(repo["path"], "branch", "-m", made, branch)  # undo the slugification
     return path
 
@@ -409,6 +422,27 @@ def removal_blocker(repo: dict, path: str, force: bool) -> str | None:
     if has_populated_submodules(path):
         return "contains populated submodules"
     return None
+
+
+def branch_sha(repo: dict, branch: str) -> str:
+    return git(repo["path"], "rev-parse", "--verify", f"refs/heads/{branch}", check=False).strip()
+
+
+def remove_worktree_keeping_branch(cfg: dict, repo: dict, path: str, branch: str) -> None:
+    """Remove a worktree without letting the backend take the branch with it.
+
+    `orca worktree rm` deletes the branch too, which is fine for one we just
+    created and catastrophic for one that was already there.
+    """
+    sha = branch_sha(repo, branch)
+    remove_worktree(cfg, repo, path, force=True)
+    if sha and not branch_exists(repo, branch):
+        git(repo["path"], "branch", branch, sha, check=False)
+
+
+def local_branches(repo: dict) -> set[str]:
+    out = git(repo["path"], "for-each-ref", "--format=%(refname:short)", "refs/heads", check=False)
+    return {b for b in out.splitlines() if b}
 
 
 def remove_worktree(cfg: dict, repo: dict, path: str, force: bool) -> None:
@@ -618,7 +652,7 @@ def cmd_rm(cfg: dict, a: argparse.Namespace) -> None:
         # `orca worktree rm` deletes the branch too, merged or not. Remember where
         # it pointed so the keep-or-delete decision stays ours and identical on
         # both backends, instead of Orca quietly discarding unmerged work.
-        sha = git(repo["path"], "rev-parse", "--verify", f"refs/heads/{a.branch}", check=False).strip()
+        sha = branch_sha(repo, a.branch)
         try:
             remove_worktree(cfg, repo, path, force=a.force)
         except Fail as e:
