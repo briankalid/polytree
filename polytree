@@ -1,0 +1,289 @@
+#!/usr/bin/env python3
+"""polytree — one feature, many repos.
+
+Create or link a git worktree with the SAME branch across several repositories,
+then launch ONE agent session that can see and edit all of them at once.
+
+Tool-agnostic by design:
+  * worktrees : plain `git worktree`. Orca is an OPTIONAL backend (auto-detected).
+  * agent     : an adapter table in config. `claude` and `codex` ship built in;
+                any other agent that accepts extra roots works via config only.
+
+Commands:
+  polytree new <name>      create the worktree set in every repo + launch the agent
+  polytree link [branch]   existing worktrees: launch the linked agent
+  polytree paths [branch]  print the sibling worktree paths (no side effects)
+  polytree ls              show resolved config (backend, agent, repos)
+  polytree help
+
+Config: $XDG_CONFIG_HOME/polytree/config.toml  (see `polytree help`)
+License: MIT
+"""
+from __future__ import annotations
+
+import json
+import os
+import shlex
+import shutil
+import subprocess
+import sys
+import tomllib
+from pathlib import Path
+
+CONFIG = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "polytree" / "config.toml"
+
+# Built-in agent adapters. Anything here can be overridden/extended from config.
+#
+# Verified behaviour (Claude Code 2.1.209) for directories attached with --add-dir:
+#   .claude/skills/  -> discovered automatically
+#   CLAUDE.md        -> NOT loaded unless CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1
+#   .mcp.json        -> NOT loaded; --mcp-config pulls it in (and adds to existing)
+#   settings/hooks   -> never loaded from an attached dir (host repo only)
+# Codex reads AGENTS.md hierarchically across roots and needs no env var.
+BUILTIN_AGENTS: dict[str, dict] = {
+    "claude": {
+        "attach": "--add-dir {dir}",
+        "env": {"CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD": "1"},
+        "attach_if_exists": {".mcp.json": "--mcp-config {dir}/.mcp.json"},
+    },
+    "codex": {
+        "attach": "--add-dir {dir}",
+    },
+}
+
+EXAMPLE = """\
+# ~/.config/polytree/config.toml
+backend = "auto"            # auto | git | orca   (auto = orca if installed, else git)
+agent   = "claude"          # any key under [agents], or a built-in (claude, codex)
+root    = "~/polytree"      # where git-backend worktrees live: <root>/<feature>/<repo>
+
+[[repos]]                   # the first repo (or host = true) hosts the agent
+path = "~/code/my-api"
+base = "origin/main"        # optional; default = the repo's origin/HEAD
+host = true
+
+[[repos]]
+path = "~/code/my-web"
+
+[agents.my-agent]           # add any agent without touching the code
+attach = "--root {dir}"     # how it takes an extra directory
+# env = { FOO = "1" }
+# attach_if_exists = { ".mcp.json" = "--mcp-config {dir}/.mcp.json" }
+"""
+
+
+def die(msg: str) -> "None":
+    print(f"polytree: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def run(args: list[str], cwd: str | None = None, check: bool = True) -> str:
+    p = subprocess.run(args, cwd=cwd, capture_output=True, text=True)
+    if check and p.returncode != 0:
+        die(f"falló: {' '.join(args)}\n{p.stderr.strip()}")
+    return p.stdout
+
+
+def git(repo: str, *args: str, check: bool = True) -> str:
+    return run(["git", "-C", repo, *args], check=check)
+
+
+def orca_bin() -> str | None:
+    return shutil.which("orca-ide") or shutil.which("orca")
+
+
+# --------------------------------------------------------------------------- config
+def load_config() -> dict:
+    if not CONFIG.exists():
+        die(f"no hay config en {CONFIG}\n\n{EXAMPLE}")
+    with CONFIG.open("rb") as fh:
+        cfg = tomllib.load(fh)
+
+    repos = cfg.get("repos") or []
+    if len(repos) < 2:
+        die("necesito al menos 2 repos en la config (ver `polytree help`)")
+    for r in repos:
+        if "path" not in r:
+            die("cada [[repos]] necesita `path`")
+        r["path"] = str(Path(r["path"]).expanduser().resolve())
+        r["name"] = r.get("name") or Path(r["path"]).name
+    # host first
+    repos.sort(key=lambda r: not r.get("host", False))
+    cfg["repos"] = repos
+
+    agents = dict(BUILTIN_AGENTS)
+    for name, spec in (cfg.get("agents") or {}).items():
+        agents[name] = {**agents.get(name, {}), **spec}
+    cfg["agents"] = agents
+
+    backend = cfg.get("backend", "auto")
+    if backend == "auto":
+        backend = "orca" if orca_bin() else "git"
+    if backend not in ("git", "orca"):
+        die(f"backend invalido: {backend}")
+    if backend == "orca" and not orca_bin():
+        die("backend 'orca' pedido pero el CLI de Orca no esta instalado")
+    cfg["backend"] = backend
+    cfg["agent"] = cfg.get("agent", "claude")
+    cfg["root"] = str(Path(cfg.get("root", "~/polytree")).expanduser())
+    return cfg
+
+
+# ------------------------------------------------------------------- discovery (git)
+def worktrees_of(repo: str) -> dict[str, str]:
+    """branch -> worktree path, for every worktree of `repo` (incl. Orca's)."""
+    out, found, path = {}, None, None
+    for line in git(repo, "worktree", "list", "--porcelain").splitlines():
+        if line.startswith("worktree "):
+            path = line[len("worktree ") :]
+        elif line.startswith("branch "):
+            found = line[len("branch ") :].removeprefix("refs/heads/")
+            if path:
+                out[found] = path
+    return out
+
+
+def sibling_paths(cfg: dict, branch: str) -> list[str]:
+    """Worktree paths for `branch`, one per configured repo, host first."""
+    return [p for r in cfg["repos"] if (p := worktrees_of(r["path"]).get(branch))]
+
+
+def current_branch() -> str:
+    p = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], capture_output=True, text=True)
+    if p.returncode != 0:
+        die("no estas en un repo git; pasa la rama explicitamente")
+    return p.stdout.strip()
+
+
+# --------------------------------------------------------------------------- create
+def default_base(repo: str) -> str:
+    head = git(repo, "symbolic-ref", "--quiet", "refs/remotes/origin/HEAD", check=False).strip()
+    return head.removeprefix("refs/remotes/") if head else "origin/main"
+
+
+def create_git(cfg: dict, repo: dict, branch: str) -> str:
+    base = repo.get("base") or cfg.get("base") or default_base(repo["path"])
+    dest = str(Path(cfg["root"]) / branch / repo["name"])
+    git(repo["path"], "fetch", "--quiet", "origin", check=False)
+    git(repo["path"], "worktree", "add", "-b", branch, dest, base)
+    return dest
+
+
+def create_orca(repo: dict, branch: str) -> str:
+    sel = repo.get("orca") or f"path:{repo['path']}"
+    out = run([orca_bin(), "worktree", "create", "--repo", sel, "--name", branch, "--json"])
+    try:
+        data = json.loads(out)
+    except json.JSONDecodeError:
+        die(f"respuesta no-JSON de Orca al crear el worktree en {repo['name']}")
+
+    def find_path(node):
+        if isinstance(node, dict):
+            for k, v in node.items():
+                if k == "path" and isinstance(v, str) and "/" in v:
+                    return v
+                if (hit := find_path(v)) is not None:
+                    return hit
+        elif isinstance(node, list):
+            for v in node:
+                if (hit := find_path(v)) is not None:
+                    return hit
+        return None
+
+    path = find_path(data.get("result", data))
+    if not path:
+        die(f"Orca no devolvio la ruta del worktree de {repo['name']}")
+    return path
+
+
+# --------------------------------------------------------------------------- launch
+def build_argv(cfg: dict, others: list[str]) -> tuple[list[str], dict[str, str]]:
+    name = cfg["agent"]
+    spec = cfg["agents"].get(name)
+    if spec is None:
+        die(f"agente '{name}' desconocido: definelo en [agents.{name}] (ver `polytree help`)")
+    if "attach" not in spec:
+        die(f"[agents.{name}] necesita `attach` (p.ej. attach = \"--add-dir {{dir}}\")")
+
+    argv = shlex.split(spec.get("cmd", name))
+    for d in others:
+        argv += [tok.format(dir=d) for tok in shlex.split(spec["attach"])]
+        for fname, tmpl in (spec.get("attach_if_exists") or {}).items():
+            if (Path(d) / fname).exists():
+                argv += [tok.format(dir=d) for tok in shlex.split(tmpl)]
+    return argv, {k: str(v) for k, v in (spec.get("env") or {}).items()}
+
+
+def launch(cfg: dict, host: str, others: list[str]) -> None:
+    argv, env = build_argv(cfg, others)
+    print(f"→ {cfg['agent']} en:")
+    print(f"    host : {host}")
+    for d in others:
+        print(f"    +dir : {d}")
+
+    if cfg["backend"] == "orca":
+        cmd = " ".join([f"{k}={shlex.quote(v)}" for k, v in env.items()] + [shlex.quote(a) for a in argv])
+        run([orca_bin(), "terminal", "create", "--worktree", f"path:{host}", "--command", cmd, "--json"])
+        print("    (terminal gestionada por Orca)")
+    else:
+        os.chdir(host)
+        os.execvpe(argv[0], argv, {**os.environ, **env})
+
+
+# ------------------------------------------------------------------------- commands
+def cmd_new(cfg: dict, args: list[str]) -> None:
+    if not args:
+        die("uso: polytree new <nombre-feature>")
+    branch = args[0]
+    print(f"Creando worktrees '{branch}' en {len(cfg['repos'])} repos (backend: {cfg['backend']})…")
+    paths = []
+    for r in cfg["repos"]:
+        p = create_orca(r, branch) if cfg["backend"] == "orca" else create_git(cfg, r, branch)
+        print(f"  {r['name']:<20} -> {p}")
+        paths.append(p)
+    launch(cfg, paths[0], paths[1:])
+
+
+def cmd_link(cfg: dict, args: list[str]) -> None:
+    branch = args[0] if args else current_branch()
+    paths = sibling_paths(cfg, branch)
+    if len(paths) < 2:
+        die(f"necesito >=2 worktrees con la rama '{branch}' (encontre {len(paths)}); creálos con: polytree new {branch}")
+    host, cwd = paths[0], os.getcwd()
+    for p in paths:  # prefer the worktree we're standing in
+        if cwd == p or cwd.startswith(p + os.sep):
+            host = p
+    launch(cfg, host, [p for p in paths if p != host])
+
+
+def cmd_paths(cfg: dict, args: list[str]) -> None:
+    branch = args[0] if args else current_branch()
+    for p in sibling_paths(cfg, branch):
+        print(p)
+
+
+def cmd_ls(cfg: dict, _args: list[str]) -> None:
+    print(f"backend : {cfg['backend']}" + ("" if cfg["backend"] == "git" else f"  ({orca_bin()})"))
+    print(f"agent   : {cfg['agent']}")
+    if cfg["backend"] == "git":
+        print(f"root    : {cfg['root']}")
+    print("repos   : (host = primero)")
+    for i, r in enumerate(cfg["repos"]):
+        print(f"  {'* ' if i == 0 else '  '}{r['name']:<20} {r['path']}")
+
+
+def main() -> None:
+    argv = sys.argv[1:]
+    sub = argv[0] if argv else "help"
+    if sub in ("help", "-h", "--help"):
+        print(__doc__)
+        print(EXAMPLE)
+        return
+    cmds = {"new": cmd_new, "link": cmd_link, "paths": cmd_paths, "ls": cmd_ls}
+    if sub not in cmds:
+        die(f"subcomando desconocido: '{sub}' ({' | '.join(cmds)} | help)")
+    cmds[sub](load_config(), argv[1:])
+
+
+if __name__ == "__main__":
+    main()
