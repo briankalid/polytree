@@ -669,11 +669,12 @@ class TestOrcaBackend(Base):
     """The orca backend had no coverage, which is how its worst bug survived.
     Orca is stubbed here: the point is polytree's logic, not Orca's."""
 
-    def _fake_orca(self, reuses_existing_branch=False):
+    def _fake_orca(self):
         """Stand in for `orca worktree create`, slug and all.
 
         Orca turns the name into a branch by replacing '/' with '-', and if that
-        branch already exists it checks it out instead of making a new one.
+        branch already exists it checks it out instead of making a new one — both
+        verified against the real CLI. Its `rm` deletes the branch too.
         """
         real_run, real_bin = pt.run, pt.orca_bin
         self.addCleanup(lambda: (setattr(pt, "run", real_run), setattr(pt, "orca_bin", real_bin)))
@@ -685,12 +686,23 @@ class TestOrcaBackend(Base):
                 slug = name.replace("/", "-")
                 sel = args[args.index("--repo") + 1].removeprefix("path:")
                 dest = str(self.tmp / "orcawt" / Path(sel).name / slug)  # per-repo, like Orca
-                if reuses_existing_branch and slug in pt.local_branches({"path": sel}):
+                if slug in pt.local_branches({"path": sel}):
                     git(sel, "worktree", "add", "-q", dest, slug)  # reuse, like Orca
                 else:
                     git(sel, "worktree", "add", "-q", "-b", slug, dest, "main")
                 return "{}"
-            if args and args[0] == "fake-orca":  # rm and friends: let git do the work
+            if args and args[0] == "fake-orca" and "rm" in args:
+                # The real `orca worktree rm` takes the branch with it, merged or
+                # not. Stubbing this as a no-op made polytree's whole reason for
+                # restoring branches pass by construction.
+                target = args[args.index("--worktree") + 1].removeprefix("path:")
+                for repo in (self.api, self.web):
+                    for branch, path in pt.worktrees_of(str(repo)).items():
+                        if path == target:
+                            git(repo, "worktree", "remove", "--force", target, check=False)
+                            git(repo, "branch", "-D", branch, check=False)
+                return "{}"
+            if args and args[0] == "fake-orca":
                 return "{}"
             return real_run(args, cwd=cwd, check=check)
 
@@ -719,7 +731,7 @@ class TestOrcaBackend(Base):
         for r in (self.api, self.web):
             git(r, "branch", "zz-collide", "main")
         sha = git(self.api, "rev-parse", "zz-collide").strip()
-        self._fake_orca(reuses_existing_branch=True)
+        self._fake_orca()
         cfg = self._orca_config()
         with self.assertRaises(pt.Fail) as e:
             self.new(cfg, "zz/collide")
@@ -773,6 +785,38 @@ class TestRollbackNeverTakesSomeoneElsesBranch(Base):
         with self.assertRaises(pt.Fail):
             self.new(cfg, "ours-to-drop")
         self.assertNotIn("ours-to-drop", pt.local_branches(cfg["repos"][0]))
+
+
+class TestOrcaRollbackKeepsForeignBranches(TestOrcaBackend):
+    """The property this tool exists not to violate, under real Orca semantics:
+    `orca worktree rm` deletes branches, and rollback uses it. A colleague's
+    branch must survive a partial failure anyway."""
+
+    def test_rollback_restores_the_branch_orca_deleted(self):
+        for r in (self.api, self.web):
+            git(r, "branch", "their-wip", "main")
+        git(self.api, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q",
+            "--allow-empty", "-m", "their unpushed work")
+        git(self.api, "branch", "-f", "their-wip", "HEAD")
+        sha = git(self.api, "rev-parse", "their-wip").strip()
+
+        self._fake_orca()  # rm deletes branches, like the real thing
+        cfg = self._orca_config()
+        real = pt.create_orca
+
+        def boom(c, repo, branch, override=None, existing=False, issue=None):
+            if repo["name"] == "web":
+                pt.die("simulated failure on the second repo")
+            return real(c, repo, branch, override, existing, issue)
+
+        pt.create_orca = boom
+        self.addCleanup(lambda: setattr(pt, "create_orca", real))
+        with self.assertRaises(pt.Fail):
+            self.new(cfg, "their-wip", existing=True)
+
+        self.assertIn("their-wip", pt.local_branches(cfg["repos"][0]))  # restored
+        self.assertEqual(git(self.api, "rev-parse", "their-wip").strip(), sha)  # same commit
+        self.assertNotIn("their-wip", pt.worktrees_of(str(self.api)))  # worktree gone
 
 
 class TestOrcaLeak(Base):

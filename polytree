@@ -445,9 +445,13 @@ def remove_worktree_keeping_branch(cfg: dict, repo: dict, path: str, branch: str
     created and catastrophic for one that was already there.
     """
     sha = branch_sha(repo, branch)
-    remove_worktree(cfg, repo, path, force=True)
-    if sha and not branch_exists(repo, branch):
-        git(repo["path"], "branch", branch, sha, check=False)
+    try:
+        remove_worktree(cfg, repo, path, force=True)
+    finally:
+        # finally, not after: if the removal dies once Orca has already dropped
+        # the branch, the restore must still happen or the branch is gone.
+        if sha and not branch_exists(repo, branch):
+            git(repo["path"], "branch", branch, sha, check=False)
 
 
 def local_branches(repo: dict) -> set[str]:
@@ -540,6 +544,7 @@ def launch(cfg: dict, spec: dict, host: str, others: list[str], prompt: str | No
 
 # ---------------------------------------------------------------------- commands
 def cmd_new(cfg: dict, a: argparse.Namespace) -> None:
+    pr_repo = None
     if a.pr:
         if a.name:
             die("--pr takes the branch from the pull request; drop the name argument")
@@ -576,11 +581,17 @@ def cmd_new(cfg: dict, a: argparse.Namespace) -> None:
         if not has_branch:
             ours.add(r["name"])  # we are about to create it, so we may delete it
         if a.existing and not (has_branch or has_remote):
-            if a.pr:
+            if a.pr and r is pr_repo:
                 die(
                     f"the branch for PR {a.pr} ({branch!r}) is not on origin in {r['name']} — "
                     f"nothing was created.\nIt most likely lives in a fork, which polytree "
-                    f"cannot fetch yet. Fetch the branch yourself, or review the PR from Orca."
+                    f"cannot fetch yet. Review that PR from Orca instead."
+                )
+            if a.pr:
+                die(
+                    f"PR {a.pr} is on {branch!r}, which exists in {pr_repo['name']} but not in "
+                    f"{r['name']} — nothing was created.\nThat pull request only touches one "
+                    f"repo, so there is no set to make. Review it from Orca instead."
                 )
             die(
                 f"branch {branch!r} exists neither locally nor on origin in {r['name']} — "
