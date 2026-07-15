@@ -64,7 +64,7 @@ Each repo's directory name must be unique — it's the folder name under `<root>
 
 ### Which ref do the branches start from?
 
-Per repo, in order: that repo's `base` → the global `base` → the repo's `origin/HEAD` → its local default branch. If none of those resolve, polytree tells you instead of guessing.
+Per repo, in order: `--base` on the command line → that repo's `base` → the global `base` → the repo's `origin/HEAD` → its local default branch. If none of those resolve, polytree tells you instead of guessing. The chosen ref is checked in every repo before anything is created.
 
 If you leave `base` unset the two backends differ: the git backend uses `origin/HEAD`, while the orca backend defers to the base ref you configured for that repo in Orca. Set `base` explicitly if you need them to agree.
 
@@ -86,7 +86,13 @@ git push -u origin <branch>
 | `polytree paths [branch]` | Print the sibling worktree paths. No side effects |
 | `polytree ls` | Show the resolved config (backend, agent, repos) |
 
-`new` and `link` take `--host <repo>` to choose which repo runs the agent (default: the first in your config — see the hooks caveat below). `new` takes `--no-launch` to create the worktrees without starting anything.
+`new` and `link` take `--host <repo>` to choose which repo runs the agent (default: the first in your config — see the hooks caveat below). `new` takes `--no-launch` to create the worktrees without starting anything, and `--base <ref>` to branch off something other than the configured base — the hotfix case:
+
+```bash
+polytree new hotfix-payments --base origin/master   # config still says origin/dev
+```
+
+`--base` applies the same ref to every repo, so it wants a name they share (`master`, `main`). If a repo doesn't have it, polytree says which one and creates nothing.
 
 ## What your agent actually picks up
 

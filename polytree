@@ -265,6 +265,15 @@ def dest_for(cfg: dict, repo: dict, branch: str) -> str:
     return str(Path(cfg["root"]) / branch / repo["name"])
 
 
+def configured_base(cfg: dict, repo: dict, override: str | None) -> str | None:
+    """The base someone asked for: --base, then the repo's, then the global one.
+
+    None means nobody asked — the git backend then falls back to the repo's
+    origin/HEAD, and the orca backend defers to Orca's own base ref.
+    """
+    return override or repo.get("base") or cfg.get("base")
+
+
 def default_base(repo: dict) -> str:
     head = git(repo["path"], "symbolic-ref", "--quiet", "refs/remotes/origin/HEAD", check=False).strip()
     if head:
@@ -278,10 +287,9 @@ def default_base(repo: dict) -> str:
     )
 
 
-def create_git(cfg: dict, repo: dict, branch: str) -> str:
-    base = repo.get("base") or cfg.get("base") or default_base(repo)
+def create_git(cfg: dict, repo: dict, branch: str, override: str | None = None) -> str:
+    base = configured_base(cfg, repo, override) or default_base(repo)
     dest = dest_for(cfg, repo, branch)
-    git(repo["path"], "fetch", "--quiet", "origin", check=False)  # best effort
     # --no-track matters: branching off a remote ref like origin/dev would, with
     # git's default branch.autoSetupMerge, make the feature branch track dev. Then
     # `git push` fails and helpfully suggests `git push origin HEAD:dev` — pushing
@@ -291,7 +299,7 @@ def create_git(cfg: dict, repo: dict, branch: str) -> str:
     return dest
 
 
-def create_orca(cfg: dict, repo: dict, branch: str) -> str:
+def create_orca(cfg: dict, repo: dict, branch: str, override: str | None = None) -> str:
     """Create through Orca, then locate the worktree with git.
 
     We deliberately do NOT parse Orca's JSON for the path: that schema is not a
@@ -300,8 +308,8 @@ def create_orca(cfg: dict, repo: dict, branch: str) -> str:
     """
     sel = repo.get("orca") or f"path:{repo['path']}"
     args = [orca_bin(), "worktree", "create", "--repo", sel, "--name", branch, "--json"]
-    base = repo.get("base") or cfg.get("base")
-    if base:
+    base = configured_base(cfg, repo, override)
+    if base:  # nobody asked -> let Orca use the base ref configured for the repo
         args += ["--base-branch", base]
     run(args)
     path = worktrees_of(repo["path"]).get(branch)
@@ -441,12 +449,19 @@ def cmd_new(cfg: dict, a: argparse.Namespace) -> None:
             )
         if cfg["backend"] == "git" and Path(dest_for(cfg, r, branch)).exists():
             die(f"{dest_for(cfg, r, branch)} already exists — nothing was created")
+        # Fetch first so a base like origin/master resolves, then check it exists
+        # here rather than discovering it halfway through creating the set.
+        git(r["path"], "fetch", "--quiet", "origin", check=False)  # best effort
+        base = configured_base(cfg, r, a.base) or (default_base(r) if cfg["backend"] == "git" else None)
+        if base and not git_ok(r["path"], "rev-parse", "--verify", "--quiet", f"{base}^{{commit}}"):
+            die(f"base {base!r} does not exist in {r['name']} — nothing was created")
 
     info(f"Creating '{branch}' worktrees in {len(cfg['repos'])} repos (backend: {cfg['backend']})…")
     created: list[tuple[dict, str]] = []
     try:
         for r in cfg["repos"]:
-            path = create_orca(cfg, r, branch) if cfg["backend"] == "orca" else create_git(cfg, r, branch)
+            path = (create_orca(cfg, r, branch, a.base) if cfg["backend"] == "orca"
+                    else create_git(cfg, r, branch, a.base))
             created.append((r, path))
             info(f"  {r['name']:<20} -> {path}")
     except Fail as e:
@@ -564,6 +579,7 @@ def build_parser() -> argparse.ArgumentParser:
     n = sub.add_parser("new", help="create the worktree set in every repo + launch the agent")
     n.add_argument("name", help="branch name, used in every repo")
     n.add_argument("--host", metavar="REPO", help="repo that hosts the agent (default: first in config)")
+    n.add_argument("--base", metavar="REF", help="branch off this ref instead of the configured base (e.g. --base origin/master for a hotfix)")
     n.add_argument("--no-launch", action="store_true", help="create the worktrees, don't start the agent")
     n.set_defaults(fn=cmd_new)
 

@@ -54,7 +54,7 @@ class Base(unittest.TestCase):
         return pt.load_config()
 
     def new(self, cfg, name, **kw):
-        args = argparse.Namespace(name=name, host=None, no_launch=True, **kw)
+        args = argparse.Namespace(name=name, host=None, no_launch=True, base=None, **kw)
         pt.cmd_new(cfg, args)
 
 
@@ -189,9 +189,29 @@ class TestNewAndRollback(Base):
         self.assertIn("already exists", str(e.exception))
         self.assertNotIn("collide", pt.worktrees_of(str(self.api)))  # api untouched
 
-    def test_rollback_when_a_later_repo_fails(self):
-        """web has a bad base: api is created first, then must be rolled back."""
+    def test_preflight_rejects_a_bad_base_before_creating_anything(self):
+        """A base that doesn't resolve is caught up front, so there is nothing
+        to roll back in the first place."""
         cfg = self.write_config(web_base="origin/does-not-exist")
+        with self.assertRaises(pt.Fail) as e:
+            self.new(cfg, "badbase")
+        self.assertIn("does not exist", str(e.exception))
+        self.assertIn("nothing was created", str(e.exception))
+        self.assertNotIn("badbase", pt.worktrees_of(str(self.api)))
+
+    def test_rollback_when_a_later_repo_fails(self):
+        """A failure the preflight cannot foresee (disk, races, git itself):
+        api is created first, then must be rolled back."""
+        cfg = self.write_config()
+        real = pt.create_git
+
+        def boom(c, repo, branch, override=None):
+            if repo["name"] == "web":
+                pt.die("simulated failure creating web's worktree")
+            return real(c, repo, branch, override)
+
+        pt.create_git = boom
+        self.addCleanup(lambda: setattr(pt, "create_git", real))
         with self.assertRaises(pt.Fail) as e:
             self.new(cfg, "boom")
         self.assertIn("Rolled back", str(e.exception))
@@ -294,7 +314,7 @@ class TestAgentValidatedBeforeSideEffects(Base):
         cfg = self.write_config()
         cfg["agent"] = "typo-agent"
         with self.assertRaises(pt.Fail):
-            pt.cmd_new(cfg, argparse.Namespace(name="x", host=None, no_launch=False))
+            pt.cmd_new(cfg, argparse.Namespace(name="x", host=None, no_launch=False, base=None))
         self.assertNotIn("x", pt.worktrees_of(str(self.api)))
         self.assertNotIn("x", pt.worktrees_of(str(self.web)))
 
@@ -302,7 +322,7 @@ class TestAgentValidatedBeforeSideEffects(Base):
         cfg = self.write_config()
         cfg["agents"]["fake"]["cmd"] = "definitely-not-a-real-binary-xyz"
         with self.assertRaises(pt.Fail):
-            pt.cmd_new(cfg, argparse.Namespace(name="y", host=None, no_launch=False))
+            pt.cmd_new(cfg, argparse.Namespace(name="y", host=None, no_launch=False, base=None))
         self.assertNotIn("y", pt.worktrees_of(str(self.api)))
 
 
@@ -362,11 +382,11 @@ class TestRollbackOnInterrupt(Base):
         real = pt.create_git
         calls = []
 
-        def boom(c, repo, branch):
+        def boom(c, repo, branch, override=None):
             if repo["name"] == "web":
                 raise KeyboardInterrupt
             calls.append(repo["name"])
-            return real(c, repo, branch)
+            return real(c, repo, branch, override)
 
         pt.create_git = boom
         self.addCleanup(lambda: setattr(pt, "create_git", real))
