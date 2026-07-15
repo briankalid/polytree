@@ -777,9 +777,11 @@ def build_parser() -> argparse.ArgumentParser:
     pa.add_argument("branch", nargs="?", help="default: the branch of the current directory")
     pa.set_defaults(fn=cmd_paths)
 
-    rm = sub.add_parser("rm", help="remove the worktree set for a branch")
+    rm = sub.add_parser("rm", help="remove the worktree set for a branch (refuses if dirty/locked)")
     rm.add_argument("branch")
-    rm.add_argument("--force", action="store_true", help="delete the branch even if unmerged")
+    rm.add_argument("--force", action="store_true",
+                    help="discard uncommitted changes, remove locked worktrees, and delete the "
+                         "branch even if unmerged")
     rm.set_defaults(fn=cmd_rm)
 
     li = sub.add_parser("list", help="show your feature sets: branches with a worktree in 2+ repos")
