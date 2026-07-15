@@ -582,6 +582,11 @@ def cmd_new(cfg: dict, a: argparse.Namespace) -> None:
         die("--issue links the worktree to an issue in Orca; it needs the orca backend")
     if a.agent:
         cfg["agent"] = a.agent
+    # Both of these are answerable from the config alone, so answer them before
+    # creating anything — the same rule resolve_agent already follows.
+    if a.host and not any(r["name"] == a.host for r in cfg["repos"]):
+        known = ", ".join(r["name"] for r in cfg["repos"])
+        die(f"--host {a.host!r} is not a configured repo (have: {known})")
     spec = None if a.no_launch else resolve_agent(cfg)  # fail before touching disk
 
     ours: set[str] = set()  # repos where the branch will be ours to delete on rollback
@@ -703,13 +708,21 @@ def cmd_paths(cfg: dict, a: argparse.Namespace) -> None:
 
 
 def cmd_rm(cfg: dict, a: argparse.Namespace) -> None:
-    present = [(r, p) for r, p in sibling_map(cfg, a.branch) if p]
+    # A repo counts if it has a live worktree OR just the branch: someone may have
+    # deleted a worktree by hand, or a rollback kept the branch. Skipping those
+    # silently left the branch and a stale registration behind, and then `new`
+    # refused while pointing at this very command, which found nothing. Wedged.
+    present: list[tuple[dict, str | None]] = []
+    for r in cfg["repos"]:
+        path = worktrees_of(r["path"]).get(a.branch)
+        if path or branch_exists(r, a.branch):
+            present.append((r, path))
     if not present:
-        die(f"no worktrees found for branch {a.branch!r}")
+        die(f"nothing to remove for branch {a.branch!r}: no worktree and no branch")
 
     # Preflight every repo: removing repo 1 and then bailing on repo 2 is the
     # same half-a-set failure `new` refuses to make.
-    blocked = [(r["name"], b) for r, p in present if (b := removal_blocker(r, p, a.force))]
+    blocked = [(r["name"], b) for r, p in present if p and (b := removal_blocker(r, p, a.force))]
     if blocked:
         detail = ", ".join(f"{n} ({why})" for n, why in blocked)
         hint = "" if a.force else "\nCommit or stash them, or re-run with --force to discard them."
@@ -722,15 +735,19 @@ def cmd_rm(cfg: dict, a: argparse.Namespace) -> None:
         # it pointed so the keep-or-delete decision stays ours and identical on
         # both backends, instead of Orca quietly discarding unmerged work.
         sha = branch_sha(repo, a.branch)
-        try:
-            remove_worktree(cfg, repo, path, force=a.force)
-        except Fail as e:
-            # removal_blocker approximates git's rules; if git refuses anyway, say
-            # exactly what happened instead of leaving the user to guess.
-            die(
-                f"{e}\n\nAlready removed: {', '.join(done) or 'nothing'}. "
-                f"Remaining repos untouched.\nRe-run with --force, or clean up by hand."
-            )
+        if path:
+            try:
+                remove_worktree(cfg, repo, path, force=a.force)
+            except Fail as e:
+                # removal_blocker approximates git's rules; if git refuses anyway,
+                # say exactly what happened instead of leaving the user to guess.
+                die(
+                    f"{e}\n\nAlready removed: {', '.join(done) or 'nothing'}. "
+                    f"Remaining repos untouched.\nRe-run with --force, or clean up by hand."
+                )
+        else:
+            # No live worktree: drop whatever stale registration git still holds.
+            git(repo["path"], "worktree", "prune", check=False)
         if sha and not branch_exists(repo, a.branch):
             git(repo["path"], "branch", a.branch, sha, check=False)  # restore, then decide
         git_ok(repo["path"], "branch", "-D" if a.force else "-d", a.branch)
@@ -738,7 +755,8 @@ def cmd_rm(cfg: dict, a: argparse.Namespace) -> None:
         if branch_exists(repo, a.branch):
             kept.append(repo)
         note = "  (branch kept: not merged)" if repo in kept else ""
-        info(f"  {repo['name']:<20} removed {path}{note}")
+        what = f"removed {path}" if path else "no worktree (branch only)"
+        info(f"  {repo['name']:<20} {what}{note}")
         done.append(repo["name"])
 
     if kept:

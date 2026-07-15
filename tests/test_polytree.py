@@ -1021,12 +1021,19 @@ class TestBrokenWorldRecovery(Base):
         self.assertNotIn("halfgone", "\n".join(out))  # 1 repo left is not a set
 
     def test_rm_after_a_worktree_was_deleted_by_hand(self):
-        """The set is half gone; rm must clean the rest rather than refuse."""
+        """The set is half gone; rm must clean BOTH — including the damaged repo.
+        This test used to check only the healthy one, which is precisely how the
+        silent skip survived: the damaged repo kept its branch and a stale
+        registration, and `new` then refused while pointing back at `rm`."""
         cfg = self.write_config()
         self.new(cfg, "halfgone")
         subprocess.run(["rm", "-rf", pt.worktrees_of(str(self.api))["halfgone"]])
         pt.cmd_rm(cfg, argparse.Namespace(branch="halfgone", force=True))
         self.assertNotIn("halfgone", pt.worktrees_of(str(self.web)))
+        self.assertNotIn("halfgone", pt.local_branches(cfg["repos"][0]))  # damaged repo too
+        self.assertNotIn("halfgone", pt.local_branches(cfg["repos"][1]))
+        self.new(cfg, "halfgone")  # and you are not wedged: it can be recreated
+        self.assertIn("halfgone", pt.worktrees_of(str(self.api)))
 
     def test_new_when_the_destination_is_occupied_by_a_stray_directory(self):
         cfg = self.write_config()
