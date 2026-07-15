@@ -807,6 +807,12 @@ def main() -> None:
         sys.exit(1)
     except KeyboardInterrupt:
         sys.exit(130)
+    except BrokenPipeError:
+        # `polytree list | head` closes the pipe on us. Exit like every other CLI
+        # does, rather than dumping a traceback; the devnull dance stops Python
+        # from complaining again while flushing at exit.
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        sys.exit(141)  # 128 + SIGPIPE
 
 
 if __name__ == "__main__":
