@@ -500,7 +500,7 @@ class TestExisting(Base):
         cfg = self.write_config()
         with self.assertRaises(pt.Fail) as e:
             self.new(cfg, "half", existing=True)
-        self.assertIn("does not exist in web", str(e.exception))
+        self.assertIn("neither locally nor on origin in web", str(e.exception))
         self.assertNotIn("half", pt.worktrees_of(str(self.api)))  # nothing created
 
     def test_existing_with_base_is_rejected(self):
@@ -508,6 +508,43 @@ class TestExisting(Base):
         with self.assertRaises(pt.Fail) as e:
             self.new(cfg, "x", existing=True, base="origin/master")
         self.assertIn("--base", str(e.exception))
+
+
+class TestExistingFromRemote(Base):
+    def _with_origin(self):
+        """Both repos share an origin that has a branch neither has locally —
+        i.e. a colleague just pushed their PR."""
+        origin = self.tmp / "origin.git"
+        subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(origin)], check=True)
+        for r in (self.api, self.web):
+            git(r, "remote", "add", "origin", str(origin))
+        git(self.api, "push", "-q", "origin", "main")
+        git(self.api, "checkout", "-q", "-b", "their-pr")
+        git(self.api, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty",
+            "-m", "their work")
+        git(self.api, "push", "-q", "origin", "their-pr")
+        git(self.api, "checkout", "-q", "main")
+        git(self.api, "branch", "-q", "-D", "their-pr")  # remote-only from here on
+        for r in (self.api, self.web):
+            git(r, "fetch", "-q", "origin")
+
+    def test_existing_works_on_a_remote_only_branch(self):
+        """The whole point of --existing: a branch you have not checked out yet.
+        git creates the local branch from origin/<branch> by itself."""
+        self._with_origin()
+        self.assertFalse(pt.git_ok(str(self.api), "show-ref", "--verify", "--quiet",
+                                   "refs/heads/their-pr"))  # nothing local
+        cfg = self.write_config()
+        self.new(cfg, "their-pr", existing=True)
+        wt = pt.worktrees_of(str(self.api))["their-pr"]
+        self.assertEqual(git(wt, "log", "--oneline", "-1", "--format=%s").strip(), "their work")
+
+    def test_existing_rejects_a_branch_nobody_has(self):
+        self._with_origin()
+        cfg = self.write_config()
+        with self.assertRaises(pt.Fail) as e:
+            self.new(cfg, "ghost-branch", existing=True)
+        self.assertIn("neither locally nor on origin", str(e.exception))
 
 
 class TestAgentAndPromptOverrides(Base):

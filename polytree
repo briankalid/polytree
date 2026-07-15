@@ -314,19 +314,33 @@ def create_orca(cfg: dict, repo: dict, branch: str, override: str | None = None,
     args = [orca_bin(), "worktree", "create", "--repo", sel, "--name", branch, "--json"]
     if issue:
         args += ["--issue", str(issue)]
-    if not existing:  # Orca checks an existing branch out as-is; no base applies
+    if not existing:
         base = configured_base(cfg, repo, override)
         if base:  # nobody asked -> let Orca use the base ref configured for the repo
             args += ["--base-branch", base]
+
+    # Find the new worktree by diffing, not by looking up `branch`: Orca slugifies
+    # --name into the branch it creates ("feature/x" -> "feature-x"), so the branch
+    # we asked for may not be the branch we get.
+    before = {r["worktree"] for r in worktree_records(repo["path"])}
     run(args)
-    path = worktrees_of(repo["path"]).get(branch)
-    if not path:
-        # Orca may well have created something we cannot see; don't pretend otherwise.
+    fresh = [r for r in worktree_records(repo["path"]) if r["worktree"] not in before]
+    if len(fresh) != 1:
         die(
-            f"Orca reported success but no worktree on branch {branch!r} exists in "
-            f"{repo['name']}. Check `orca worktree list` — a worktree may have been "
-            f"created that polytree could not locate, and cannot clean up."
+            f"expected Orca to create exactly one worktree in {repo['name']}, saw {len(fresh)}.\n"
+            f"Check `orca worktree list`; polytree cannot tell which one is new."
         )
+    path, made = fresh[0]["worktree"], fresh[0].get("branch", "").removeprefix("refs/heads/")
+
+    if existing:
+        # Orca cannot check an existing branch out: it always makes a new one off
+        # the base, which would silently hand you an empty branch instead of the
+        # work you meant to review. Put the worktree on the right branch ourselves.
+        git(path, "checkout", branch)  # DWIMs a local branch from origin/<branch>
+        if made and made != branch:
+            git(repo["path"], "branch", "-D", made, check=False)  # drop Orca's throwaway
+    elif made and made != branch:
+        git(repo["path"], "branch", "-m", made, branch)  # undo the slugification
     return path
 
 
@@ -456,11 +470,18 @@ def cmd_new(cfg: dict, a: argparse.Namespace) -> None:
     spec = None if a.no_launch else resolve_agent(cfg)  # fail before touching disk
 
     for r in cfg["repos"]:  # preflight: never create half a set
+        # Fetch before looking: --existing usually means a branch someone else
+        # pushed, which is a remote ref until we ask. Also lets a base like
+        # origin/master resolve below.
+        git(r["path"], "fetch", "--quiet", "origin", check=False)  # best effort
         has_branch = git_ok(r["path"], "show-ref", "--verify", "--quiet", f"refs/heads/{branch}")
-        if a.existing and not has_branch:
+        # git checks out origin/<branch> into a new local branch on its own, so a
+        # remote-only branch counts as existing.
+        has_remote = git_ok(r["path"], "show-ref", "--verify", "--quiet", f"refs/remotes/origin/{branch}")
+        if a.existing and not (has_branch or has_remote):
             die(
-                f"branch {branch!r} does not exist in {r['name']} — nothing was created.\n"
-                f"Fetch it first, or drop --existing to create it."
+                f"branch {branch!r} exists neither locally nor on origin in {r['name']} — "
+                f"nothing was created.\nDrop --existing to create it."
             )
         if not a.existing and has_branch:
             die(
@@ -472,9 +493,6 @@ def cmd_new(cfg: dict, a: argparse.Namespace) -> None:
             die(f"{r['name']} already has a worktree for {branch!r} — nothing was created")
         if cfg["backend"] == "git" and Path(dest_for(cfg, r, branch)).exists():
             die(f"{dest_for(cfg, r, branch)} already exists — nothing was created")
-        # Fetch first so a base like origin/master resolves, then check it exists
-        # here rather than discovering it halfway through creating the set.
-        git(r["path"], "fetch", "--quiet", "origin", check=False)  # best effort
         if a.existing:
             continue
         base = configured_base(cfg, r, a.base) or (default_base(r) if cfg["backend"] == "git" else None)
