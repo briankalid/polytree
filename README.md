@@ -95,7 +95,7 @@ polytree new hotfix-payments --base origin/master   # config still says origin/d
 
 `--base` applies the same ref to every repo, so it wants a name they share (`master`, `main`). If a repo doesn't have it, polytree says which one and creates nothing.
 
-Reviewing a branch someone else pushed? It already exists, so `new` would refuse — use `--existing` to check it out into a worktree set instead of creating a branch:
+Reviewing a branch someone else pushed? It already exists — locally or on `origin` — so `new` refuses rather than shadow it with a new branch off the base. Use `--existing` to check it out into a worktree set instead:
 
 ```bash
 polytree new their-feature --existing

@@ -380,9 +380,18 @@ def create_orca(cfg: dict, repo: dict, branch: str, override: str | None = None,
             # Orca cannot check an existing branch out: it always makes a new one
             # off the base, which would silently hand you an empty branch instead
             # of the work you meant to review. Put it on the right branch.
-            git(path, "checkout", branch)  # DWIMs a local branch from origin/<branch>
+            #
+            # Drop Orca's branch BEFORE checking out, and detach first so git will
+            # let go of it. Order matters: when the branch we want has no slug to
+            # change (no slash) and only exists on the remote, Orca's throwaway is
+            # named exactly like it — so checking out first is a no-op that leaves
+            # the worktree sitting on base, and the delete then fails because the
+            # branch is checked out. That is silent, and it is the common shape of
+            # a PR branch.
             if ours:
-                git(repo["path"], "branch", "-D", made, check=False)  # Orca's throwaway
+                git(path, "checkout", "--detach", "--quiet")
+                git(repo["path"], "branch", "-D", made)  # loud: we made this one
+            git(path, "checkout", branch)  # DWIMs a local branch from origin/<branch>
         elif made and made != branch:
             if not ours:
                 # Orca slugified our name onto a branch that already existed and
@@ -576,6 +585,7 @@ def cmd_new(cfg: dict, a: argparse.Namespace) -> None:
     spec = None if a.no_launch else resolve_agent(cfg)  # fail before touching disk
 
     ours: set[str] = set()  # repos where the branch will be ours to delete on rollback
+    missing: list[str] = []  # repos without the branch; only named once ALL are checked
     for r in cfg["repos"]:  # preflight: never create half a set
         # Fetch before looking: --existing usually means a branch someone else
         # pushed, which is a remote ref until we ask. Also lets a base like
@@ -588,25 +598,11 @@ def cmd_new(cfg: dict, a: argparse.Namespace) -> None:
         if not has_branch:
             ours.add(r["name"])  # we are about to create it, so we may delete it
         if a.existing and not (has_branch or has_remote):
-            if a.pr and r is pr_repo:
-                die(
-                    f"the branch for PR {a.pr} ({branch!r}) is not on origin in {r['name']} — "
-                    f"nothing was created.\nIt most likely lives in a fork, which polytree "
-                    f"cannot fetch yet. Review that PR from Orca instead."
-                )
-            if a.pr:
-                die(
-                    f"PR {a.pr} is on {branch!r}, which exists in {pr_repo['name']} but not in "
-                    f"{r['name']} — nothing was created.\nThat pull request only touches one "
-                    f"repo, so there is no set to make. Review it from Orca instead."
-                )
+            missing.append(r["name"])
+        if not a.existing and (has_branch or has_remote):
+            where = "already exists" if has_branch else "already exists on origin"
             die(
-                f"branch {branch!r} exists neither locally nor on origin in {r['name']} — "
-                f"nothing was created.\nDrop --existing to create it."
-            )
-        if not a.existing and has_branch:
-            die(
-                f"branch {branch!r} already exists in {r['name']} — nothing was created.\n"
+                f"branch {branch!r} {where} in {r['name']} — nothing was created.\n"
                 f"Use --existing to check it out, `polytree link {branch}` if the worktrees "
                 f"exist, `polytree rm {branch}` to clean up, or pick another name."
             )
@@ -619,6 +615,28 @@ def cmd_new(cfg: dict, a: argparse.Namespace) -> None:
         base = configured_base(cfg, r, a.base) or (default_base(r) if cfg["backend"] == "git" else None)
         if base and not git_ok(r["path"], "rev-parse", "--verify", "--quiet", f"{base}^{{commit}}"):
             die(f"base {base!r} does not exist in {r['name']} — nothing was created")
+
+    if missing:
+        # Say only what was checked. Which repo trips first in the loop is not
+        # evidence about where the branch lives.
+        where = ", ".join(missing)
+        if a.pr and pr_repo["name"] in missing:
+            die(
+                f"the branch for PR {a.pr} ({branch!r}) is not on origin in {pr_repo['name']} "
+                f"itself — nothing was created.\nIt most likely lives in a fork, which polytree "
+                f"cannot fetch yet. Review that PR from Orca, or fetch the branch yourself."
+            )
+        have = [r["name"] for r in cfg["repos"] if r["name"] not in missing]
+        if a.pr:
+            die(
+                f"PR {a.pr} is on {branch!r}, which is in {', '.join(have)} but not in {where} — "
+                f"nothing was created.\nThat pull request does not span every configured repo, "
+                f"so there is no set to make. Review it from Orca instead."
+            )
+        die(
+            f"branch {branch!r} exists neither locally nor on origin in {where} — "
+            f"nothing was created.\nDrop --existing to create it."
+        )
 
     info(f"Creating '{branch}' worktrees in {len(cfg['repos'])} repos (backend: {cfg['backend']})…")
     created: list[tuple[dict, str]] = []
@@ -650,7 +668,11 @@ def cmd_link(cfg: dict, a: argparse.Namespace) -> None:
     if len(present) < 2:
         # Suggest the command that will actually work: if the branch already
         # exists (a colleague's PR), plain `new` would just refuse.
-        exists_somewhere = any(branch_exists(r, branch) for r, _ in pairs)
+        exists_somewhere = any(
+            branch_exists(r, branch)
+            or git_ok(r["path"], "show-ref", "--verify", "--quiet", f"refs/remotes/origin/{branch}")
+            for r, _ in pairs
+        )
         fix = f"polytree new {branch} --existing" if exists_somewhere else f"polytree new {branch}"
         die(
             f"need >=2 worktrees for branch {branch!r}, found {len(present)}"

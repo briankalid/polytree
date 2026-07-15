@@ -273,6 +273,34 @@ class TestRm(Base):
         pt.cmd_rm(cfg, argparse.Namespace(branch="bye", force=True))
         self.assertFalse(pt.branch_exists(cfg["repos"][0], "bye"))
 
+    def test_rm_reports_the_kept_branch_and_how_to_drop_it(self):
+        """The note and the hint were deletable green: nothing captured cmd_rm's
+        output, while a docstring claimed the report was under test."""
+        cfg = self.write_config()
+        self.new(cfg, "keptnote")
+        git(pt.worktrees_of(str(self.api))["keptnote"], "-c", "user.email=t@t", "-c",
+            "user.name=t", "commit", "-q", "--allow-empty", "-m", "unmerged")
+        out = []
+        real = pt.info
+        self.addCleanup(lambda: setattr(pt, "info", real))
+        pt.info = out.append
+        pt.cmd_rm(cfg, argparse.Namespace(branch="keptnote", force=False))
+        text = "\n".join(out)
+        self.assertIn("branch kept: not merged", text)
+        self.assertIn(f"git -C {self.api} branch -D keptnote", text)  # a command that works
+        self.assertTrue(pt.branch_exists(cfg["repos"][0], "keptnote"))  # and it is true
+
+    def test_rm_says_nothing_about_keeping_a_branch_it_deleted(self):
+        cfg = self.write_config()
+        self.new(cfg, "gonenote")  # merged into main: -d succeeds
+        out = []
+        real = pt.info
+        self.addCleanup(lambda: setattr(pt, "info", real))
+        pt.info = out.append
+        pt.cmd_rm(cfg, argparse.Namespace(branch="gonenote", force=False))
+        self.assertNotIn("branch kept", "\n".join(out))
+        self.assertFalse(pt.branch_exists(cfg["repos"][0], "gonenote"))
+
     def test_rm_unknown_branch_fails(self):
         cfg = self.write_config()
         with self.assertRaises(pt.Fail):
@@ -817,6 +845,81 @@ class TestOrcaRollbackKeepsForeignBranches(TestOrcaBackend):
         self.assertIn("their-wip", pt.local_branches(cfg["repos"][0]))  # restored
         self.assertEqual(git(self.api, "rev-parse", "their-wip").strip(), sha)  # same commit
         self.assertNotIn("their-wip", pt.worktrees_of(str(self.api)))  # worktree gone
+
+
+class TestOrcaExistingFromRemote(TestOrcaBackend):
+    """--existing on the orca backend had no coverage at all, and none of it set
+    up a remote — which is how the flagship --pr path shipped broken."""
+
+    def _remote_branch(self, name):
+        """A branch that exists only on origin, like every PR branch you fetch."""
+        origin = self.tmp / "origin.git"
+        if not origin.exists():
+            subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(origin)], check=True)
+            for r in (self.api, self.web):
+                git(r, "remote", "add", "origin", str(origin))
+            git(self.api, "push", "-q", "origin", "main")
+        git(self.api, "checkout", "-q", "-b", name)
+        git(self.api, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q",
+            "--allow-empty", "-m", "their work")
+        git(self.api, "push", "-q", "origin", name)
+        git(self.api, "checkout", "-q", "main")
+        git(self.api, "branch", "-q", "-D", name)  # remote-only from here
+        for r in (self.api, self.web):
+            git(r, "fetch", "-q", "origin")
+
+    def _run(self, name):
+        self._fake_orca()
+        cfg = self._orca_config()
+        self.new(cfg, name, existing=True)
+        wt = pt.worktrees_of(str(self.api))[name]
+        return git(wt, "log", "--oneline", "-1", "--format=%s").strip()
+
+    def test_remote_only_branch_without_a_slash(self):
+        """The PR-branch shape: no slash, so Orca's throwaway is named exactly
+        like the branch we want. Checking out first is a silent no-op."""
+        self._remote_branch("fix-login")
+        self.assertEqual(self._run("fix-login"), "their work")  # not 'init' (the base)
+
+    def test_remote_only_branch_with_a_slash(self):
+        """Control: the slug differs, which is the only shape that used to work."""
+        self._remote_branch("fix/login")
+        self.assertEqual(self._run("fix/login"), "their work")
+
+
+class TestRemoteOnlyBranchIsNotShadowed(Base):
+    """`new` on a branch that exists only on origin used to create a divergent
+    branch off the base — a shadow whose first push is rejected."""
+
+    def setUp(self):
+        super().setUp()
+        origin = self.tmp / "origin.git"
+        subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(origin)], check=True)
+        for r in (self.api, self.web):
+            git(r, "remote", "add", "origin", str(origin))
+        git(self.api, "push", "-q", "origin", "main")
+        git(self.api, "checkout", "-q", "-b", "shadowme")
+        git(self.api, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q",
+            "--allow-empty", "-m", "their work")
+        git(self.api, "push", "-q", "origin", "shadowme")
+        git(self.api, "checkout", "-q", "main")
+        git(self.api, "branch", "-q", "-D", "shadowme")
+        for r in (self.api, self.web):
+            git(r, "fetch", "-q", "origin")
+
+    def test_new_refuses_a_branch_that_exists_on_origin(self):
+        cfg = self.write_config()
+        with self.assertRaises(pt.Fail) as e:
+            self.new(cfg, "shadowme")
+        self.assertIn("already exists on origin", str(e.exception))
+        self.assertNotIn("shadowme", pt.worktrees_of(str(self.api)))
+
+    def test_link_hint_points_at_existing_not_at_a_shadow(self):
+        """The hint has to consult remotes too, or it walks you into the shadow."""
+        cfg = self.write_config()
+        with self.assertRaises(pt.Fail) as e:
+            pt.cmd_link(cfg, argparse.Namespace(branch="shadowme", host=None, agent=None, prompt=None))
+        self.assertIn("polytree new shadowme --existing", str(e.exception))
 
 
 class TestOrcaLeak(Base):
