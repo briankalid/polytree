@@ -1,18 +1,21 @@
 # Copy to ~/.config/polytree/config.toml and edit.
-backend = "auto"            # auto | git | orca   (auto = orca if installed, else git)
+backend = "auto"            # auto | git | orca  (auto = orca if installed, else git)
 agent   = "claude"          # any key under [agents], or a built-in (claude, codex)
 root    = "~/polytree"      # git backend: worktrees live at <root>/<feature>/<repo>
+base    = "origin/main"     # optional global default base ref
 
 [[repos]]                   # the first repo (or host = true) hosts the agent
 path = "~/code/my-api"
-base = "origin/main"        # optional; defaults to the repo's origin/HEAD
+base = "origin/dev"         # optional; overrides the global default
 host = true
 
 [[repos]]
 path = "~/code/my-web"
+# name = "web"              # optional; needed only if two repos share a basename
 
 # Any agent that accepts extra roots works via config alone:
 # [agents.my-agent]
-# attach = "--root {dir}"
-# env = { MY_AGENT_LOAD_EXTRA_CONFIG = "1" }
+# cmd    = "my-agent --fast"                 # optional; defaults to the table key
+# attach = "--root {dir}"                    # required: how it takes an extra dir
+# env    = { MY_AGENT_EXTRA = "1" }          # optional
 # attach_if_exists = { ".mcp.json" = "--mcp-config {dir}/.mcp.json" }

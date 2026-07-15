@@ -8,12 +8,12 @@ Your frontend and backend live in separate repositories, and every feature touch
 
 ```console
 $ polytree new checkout-redesign
-Creando worktrees 'checkout-redesign' en 2 repos (backend: git)…
-  my-api               -> ~/polytree/checkout-redesign/my-api
-  my-web               -> ~/polytree/checkout-redesign/my-web
-→ claude en:
-    host : ~/polytree/checkout-redesign/my-api
-    +dir : ~/polytree/checkout-redesign/my-web
+Creating 'checkout-redesign' worktrees in 2 repos (backend: git)…
+  my-api               -> /home/you/polytree/checkout-redesign/my-api
+  my-web               -> /home/you/polytree/checkout-redesign/my-web
+→ claude in:
+    host : /home/you/polytree/checkout-redesign/my-api
+    +dir : /home/you/polytree/checkout-redesign/my-web
 ```
 
 One command: a worktree on the **same branch** in every repo, plus **one agent session that sees all of them**.
@@ -38,27 +38,33 @@ chmod +x ~/.local/bin/polytree
 `~/.config/polytree/config.toml`:
 
 ```toml
-backend = "auto"            # auto | git | orca   (auto = orca if installed, else git)
+backend = "auto"            # auto | git | orca  (auto = orca if installed, else git)
 agent   = "claude"          # any key under [agents], or a built-in (claude, codex)
 root    = "~/polytree"      # git backend: worktrees live at <root>/<feature>/<repo>
+base    = "origin/main"     # optional global default base ref
 
 [[repos]]                   # the first repo (or host = true) hosts the agent
 path = "~/code/my-api"
-base = "origin/main"        # optional; defaults to the repo's origin/HEAD
+base = "origin/dev"         # optional; overrides the global default
 host = true
 
 [[repos]]
 path = "~/code/my-web"
 ```
 
+Each repo's directory name must be unique — it's the folder name under `<root>/<branch>/`. Set `name = "..."` explicitly if two repos share a basename.
+
 ## Commands
 
 | Command | What it does |
 |---|---|
-| `polytree new <name>` | Create a worktree on branch `<name>` in **every** repo, then launch the linked agent |
-| `polytree link [branch]` | Existing worktrees: find the siblings and launch the linked agent. No branch = the one you're standing in |
+| `polytree new <name>` | Create a worktree on branch `<name>` in **every** repo, then launch the agent. If any repo fails, everything is rolled back — you never get half a set |
+| `polytree link [branch]` | Existing worktrees: find the siblings and launch the agent. No branch = the one you're standing in |
+| `polytree rm <branch>` | Remove the worktree set. `--force` also deletes an unmerged branch |
 | `polytree paths [branch]` | Print the sibling worktree paths. No side effects |
 | `polytree ls` | Show the resolved config (backend, agent, repos) |
+
+`new` and `link` take `--host <repo>` to choose which repo runs the agent (default: the first in your config — see the hooks caveat below). `new` takes `--no-launch` to create the worktrees without starting anything.
 
 ## What your agent actually picks up
 
@@ -76,14 +82,15 @@ Verified empirically against **Claude Code 2.1.209**:
 
 **Codex** reads `AGENTS.md` hierarchically across roots and needs no env var.
 
-The practical takeaway: **hooks and settings only ever come from the host repo.** If one side has hooks you can't lose, put it first in the config.
+The practical takeaway: **hooks and settings only ever come from the host repo.** The host is the first repo in your config — deliberately not the directory you happen to be standing in, so this stays predictable. Put the side whose hooks you can't lose first, or pass `--host <repo>`.
 
 ## Backends
 
-- **`git`** (default) — plain `git worktree`. Nothing else required.
-- **`orca`** (auto-detected) — creates worktrees through [Orca](https://www.onorca.dev/) and launches the agent in an Orca-managed terminal, so the whole set shows up in the app. Purely a bonus; `polytree` never needs it.
+- **`auto`** (the default) — Orca if its CLI is installed, otherwise git. `polytree ls` and `polytree new` both print which backend is in use.
+- **`git`** — plain `git worktree`. Nothing else required. Set this explicitly if you have Orca installed but don't want polytree to use it.
+- **`orca`** — creates worktrees through [Orca](https://www.onorca.dev/) and launches the agent in an Orca-managed terminal, so the whole set shows up in the app.
 
-Discovery is always plain git, so `polytree link` and `polytree paths` work on worktrees created by either backend — or by hand.
+Discovery is always plain git, so `polytree link`, `paths` and `rm` work on worktrees created by either backend. (With the `orca` backend the *launch* goes through Orca, so the host worktree does need to be one Orca knows about.)
 
 ## Any agent
 
@@ -91,10 +98,13 @@ Discovery is always plain git, so `polytree link` and `polytree paths` work on w
 
 ```toml
 [agents.my-agent]
-attach = "--root {dir}"                                    # how it takes an extra directory
-env    = { MY_AGENT_LOAD_EXTRA_CONFIG = "1" }              # optional
-attach_if_exists = { ".mcp.json" = "--mcp-config {dir}/.mcp.json" }   # optional, only if the file exists
+cmd    = "my-agent --fast"                 # optional; defaults to the table key
+attach = "--root {dir}"                    # required: how it takes an extra directory
+env    = { MY_AGENT_EXTRA = "1" }          # optional
+attach_if_exists = { ".mcp.json" = "--mcp-config {dir}/.mcp.json" }   # optional
 ```
+
+`{dir}` is substituted per attached directory; `attach_if_exists` only fires when that file is present in the attached repo.
 
 The one thing no wrapper can fix: an agent that can't accept multiple roots at all can't be linked.
 
@@ -105,6 +115,14 @@ The one thing no wrapper can fix: an agent that can't accept multiple roots at a
 - **Contract first** — agree on the API/schema before implementing either side.
 - **Two PRs, cross-linked** — separate repos mean separate PRs; reference each in the other and merge in dependency order.
 - **The branch name is the link.** Same name in every repo is what makes discovery work.
+
+## Tests
+
+```bash
+python3 -m unittest discover -s tests
+```
+
+They cover the failure modes rather than the happy path: partial-failure rollback, re-runs, detached/prunable/newline worktrees, and config validation.
 
 ## License
 
