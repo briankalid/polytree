@@ -265,6 +265,35 @@ def dest_for(cfg: dict, repo: dict, branch: str) -> str:
     return str(Path(cfg["root"]) / branch / repo["name"])
 
 
+def branch_of_pr(cfg: dict, spec: str) -> tuple[dict, str, str]:
+    """Resolve `[<repo>#]<number>` to (repo, number, head branch) via the GitHub CLI.
+
+    Working on a PR needs nothing from Orca: a PR is a branch, and `gh` maps one
+    to the other. (Orca's own PR badge is metadata in its store, which only its
+    UI can set — git has no such concept, so polytree does not pretend to.)
+
+    The repo qualifier is not decoration: PR numbers are per-repo, so the same
+    number is a different PR in each one, and guessing would open the wrong work.
+    """
+    if not shutil.which("gh"):
+        die("--pr needs the GitHub CLI (`gh`) on PATH")
+    repo_name, _, number = spec.rpartition("#")
+    if not number.isdigit():
+        die(f"--pr: expected <number> or <repo>#<number>, got {spec!r}")
+    if repo_name:
+        repo = next((r for r in cfg["repos"] if r["name"] == repo_name), None)
+        if not repo:
+            known = ", ".join(r["name"] for r in cfg["repos"])
+            die(f"--pr: unknown repo {repo_name!r} (configured: {known})")
+    else:
+        repo = cfg["repos"][0]  # the host; always named in the output below
+    out = run(["gh", "pr", "view", number, "--json", "headRefName", "-q", ".headRefName"],
+              cwd=repo["path"], check=False).strip()
+    if not out:
+        die(f"could not resolve PR #{number} in {repo['name']} — is `gh` authenticated for it?")
+    return repo, number, out
+
+
 def configured_base(cfg: dict, repo: dict, override: str | None) -> str | None:
     """The base someone asked for: --base, then the repo's, then the global one.
 
@@ -459,7 +488,19 @@ def launch(cfg: dict, spec: dict, host: str, others: list[str], prompt: str | No
 
 # ---------------------------------------------------------------------- commands
 def cmd_new(cfg: dict, a: argparse.Namespace) -> None:
-    branch = a.name
+    if a.pr:
+        if a.name:
+            die("--pr takes the branch from the pull request; drop the name argument")
+        pr_repo, number, branch = branch_of_pr(cfg, a.pr)
+        a.existing = True
+        # Name the repo every time: PR numbers collide across repos, and a silent
+        # default would cheerfully open a different PR than the one you meant.
+        info(f"PR #{number} in {pr_repo['name']} → branch {branch!r}")
+    elif a.name:
+        branch = a.name
+    else:
+        die("give a branch name, or --pr <number> to take it from a pull request")
+
     check_branch_name(branch)
     if a.existing and a.base:
         die("--existing checks out a branch that already exists; --base has nothing to apply to")
@@ -649,10 +690,13 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="cmd", metavar="<command>")
 
     n = sub.add_parser("new", help="create the worktree set in every repo + launch the agent")
-    n.add_argument("name", help="branch name, used in every repo")
+    n.add_argument("name", nargs="?", help="branch name, used in every repo")
     n.add_argument("--host", metavar="REPO", help="repo that hosts the agent (default: first in config)")
     n.add_argument("--base", metavar="REF", help="branch off this ref instead of the configured base (e.g. --base origin/master for a hotfix)")
-    n.add_argument("--existing", action="store_true", help="check out a branch that already exists (e.g. reviewing someone's PR)")
+    n.add_argument("--pr", metavar="[REPO#]N",
+                   help="take the branch from a GitHub PR (implies --existing). PR numbers are "
+                        "per-repo: qualify as <repo>#<n>, or plain <n> for the host repo")
+    n.add_argument("--existing", action="store_true", help="check out a branch that already exists")
     n.add_argument("--agent", metavar="NAME", help="agent for this run, overriding the config")
     n.add_argument("--issue", metavar="N", help="link the worktrees to a GitHub issue (orca backend)")
     n.add_argument("--prompt", metavar="TEXT", help="initial prompt for the agent")

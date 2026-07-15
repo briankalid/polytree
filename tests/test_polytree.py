@@ -55,7 +55,7 @@ class Base(unittest.TestCase):
 
     def new(self, cfg, name, **kw):
         d = dict(name=name, host=None, no_launch=True, base=None, existing=False,
-                 agent=None, issue=None, prompt=None)
+                 agent=None, issue=None, prompt=None, pr=None)
         d.update(kw)
         args = argparse.Namespace(**d)
         pt.cmd_new(cfg, args)
@@ -317,7 +317,7 @@ class TestAgentValidatedBeforeSideEffects(Base):
         cfg = self.write_config()
         cfg["agent"] = "typo-agent"
         with self.assertRaises(pt.Fail):
-            pt.cmd_new(cfg, argparse.Namespace(name="x", host=None, no_launch=False, base=None, existing=False, agent=None, issue=None, prompt=None))
+            pt.cmd_new(cfg, argparse.Namespace(name="x", host=None, no_launch=False, base=None, existing=False, agent=None, issue=None, prompt=None, pr=None))
         self.assertNotIn("x", pt.worktrees_of(str(self.api)))
         self.assertNotIn("x", pt.worktrees_of(str(self.web)))
 
@@ -325,7 +325,7 @@ class TestAgentValidatedBeforeSideEffects(Base):
         cfg = self.write_config()
         cfg["agents"]["fake"]["cmd"] = "definitely-not-a-real-binary-xyz"
         with self.assertRaises(pt.Fail):
-            pt.cmd_new(cfg, argparse.Namespace(name="y", host=None, no_launch=False, base=None, existing=False, agent=None, issue=None, prompt=None))
+            pt.cmd_new(cfg, argparse.Namespace(name="y", host=None, no_launch=False, base=None, existing=False, agent=None, issue=None, prompt=None, pr=None))
         self.assertNotIn("y", pt.worktrees_of(str(self.api)))
 
 
@@ -547,6 +547,65 @@ class TestExistingFromRemote(Base):
         self.assertIn("neither locally nor on origin", str(e.exception))
 
 
+class TestPrSpec(Base):
+    """--pr resolution. PR numbers are per-repo: in the real repos this was built
+    against, #378 is a different pull request in each one, so an unqualified
+    number must never quietly reach for the wrong repo."""
+
+    def _fake_gh(self, mapping):
+        """mapping: repo name -> branch that `gh pr view` should return."""
+        real = pt.run
+        self.addCleanup(lambda: setattr(pt, "run", real))
+
+        def fake(args, cwd=None, check=True):
+            if args and args[0] == "gh":
+                for name, branch in mapping.items():
+                    if cwd and cwd.endswith("/" + name):
+                        return branch + "\n"
+                return ""
+            return real(args, cwd=cwd, check=check)
+
+        pt.run = fake
+
+    def test_unqualified_uses_the_host_repo(self):
+        cfg = self.write_config()
+        self._fake_gh({"api": "from-api", "web": "from-web"})
+        repo, number, branch = pt.branch_of_pr(cfg, "378")
+        self.assertEqual((repo["name"], number, branch), ("api", "378", "from-api"))
+
+    def test_qualified_picks_that_repo(self):
+        cfg = self.write_config()
+        self._fake_gh({"api": "from-api", "web": "from-web"})
+        repo, _, branch = pt.branch_of_pr(cfg, "web#378")
+        self.assertEqual((repo["name"], branch), ("web", "from-web"))
+
+    def test_unknown_repo_rejected(self):
+        cfg = self.write_config()
+        self._fake_gh({"api": "x"})
+        with self.assertRaises(pt.Fail) as e:
+            pt.branch_of_pr(cfg, "nope#1")
+        self.assertIn("unknown repo", str(e.exception))
+
+    def test_non_numeric_rejected(self):
+        cfg = self.write_config()
+        for bad in ("abc", "web#abc", ""):
+            with self.assertRaises(pt.Fail):
+                pt.branch_of_pr(cfg, bad)
+
+    def test_unresolvable_pr_rejected(self):
+        cfg = self.write_config()
+        self._fake_gh({})  # gh returns nothing
+        with self.assertRaises(pt.Fail) as e:
+            pt.branch_of_pr(cfg, "999")
+        self.assertIn("could not resolve PR #999", str(e.exception))
+
+    def test_pr_with_a_name_is_rejected(self):
+        cfg = self.write_config()
+        with self.assertRaises(pt.Fail) as e:
+            self.new(cfg, "some-name", pr="1")
+        self.assertIn("drop the name", str(e.exception))
+
+
 class TestAgentAndPromptOverrides(Base):
     def test_agent_override(self):
         cfg = self.write_config(extra='\n[agents.other]\ncmd = "echo"\nattach = "--dir {dir}"\n')
@@ -555,7 +614,7 @@ class TestAgentAndPromptOverrides(Base):
         self.addCleanup(lambda: setattr(pt, "launch", real))
         pt.launch = lambda c, s, h, o, prompt=None: launched.update(agent=c["agent"], spec=s)
         pt.cmd_new(cfg, argparse.Namespace(name="ov", host=None, no_launch=False, base=None,
-                                           existing=False, agent="other", issue=None, prompt=None))
+                                           existing=False, agent="other", issue=None, prompt=None, pr=None))
         self.assertEqual(launched["agent"], "other")
         self.assertEqual(launched["spec"]["attach"], "--dir {dir}")
 

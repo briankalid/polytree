@@ -103,6 +103,17 @@ polytree new their-feature --existing
 
 Pass the plain branch name, not `origin/their-feature`: polytree fetches first, and a branch that only exists on the remote is checked out into a local one for you.
 
+Or point at the pull request and let polytree find the branch (needs [`gh`](https://cli.github.com/)):
+
+```bash
+polytree new --pr 378              # the PR in the host repo
+polytree new --pr my-web#378       # the PR in a specific repo
+```
+
+**Qualify the repo.** PR numbers are per-repo, so #378 is a different pull request in each one — polytree names the repo it resolved against every time, and never guesses beyond the host default.
+
+What this does *not* do is attach the PR to Orca's card: that badge is metadata in Orca's own store, which only its UI writes, and git has no such concept. You get the branch, the worktrees and the agent — the work — just not the label. (`--issue <n>` does set a link, and GitHub numbers issues and PRs together, so `--issue 378` will point at the PR — labelled as an issue.)
+
 Both also take `--agent <name>` to override the configured agent for one run, and `--prompt "..."` to hand the agent its task on startup. On the orca backend, `new --issue <n>` links the worktrees to a GitHub issue.
 
 ### new, new --existing, or link?
