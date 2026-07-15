@@ -26,7 +26,7 @@ If your repos always ship in lockstep, a monorepo is probably the right answer a
 
 ## Install
 
-Requires **Python 3.11+** and **git**. No packages to install.
+Requires **Python 3.11+** and **git 2.36+** (for `worktree list -z`). No packages to install.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/<you>/polytree/main/polytree -o ~/.local/bin/polytree
@@ -41,7 +41,7 @@ chmod +x ~/.local/bin/polytree
 backend = "auto"            # auto | git | orca  (auto = orca if installed, else git)
 agent   = "claude"          # any key under [agents], or a built-in (claude, codex)
 root    = "~/polytree"      # git backend: worktrees live at <root>/<feature>/<repo>
-base    = "origin/main"     # optional global default base ref
+base    = "origin/main"     # optional global default base ref (both backends)
 
 [[repos]]                   # the first repo (or host = true) hosts the agent
 path = "~/code/my-api"
@@ -60,7 +60,7 @@ Each repo's directory name must be unique — it's the folder name under `<root>
 |---|---|
 | `polytree new <name>` | Create a worktree on branch `<name>` in **every** repo, then launch the agent. If any repo fails, everything is rolled back — you never get half a set |
 | `polytree link [branch]` | Existing worktrees: find the siblings and launch the agent. No branch = the one you're standing in |
-| `polytree rm <branch>` | Remove the worktree set. Refuses if any worktree has uncommitted changes (and removes nothing). `--force` discards those changes and deletes the branch even if unmerged |
+| `polytree rm <branch>` | Remove the worktree set. Refuses — and removes nothing — if any worktree has uncommitted changes or is locked. `--force` discards those changes and deletes the branch even if unmerged. The main checkout is never removed |
 | `polytree paths [branch]` | Print the sibling worktree paths. No side effects |
 | `polytree ls` | Show the resolved config (backend, agent, repos) |
 
@@ -82,7 +82,7 @@ Verified empirically against **Claude Code 2.1.209**:
 
 **Codex** reads `AGENTS.md` hierarchically across roots and needs no env var.
 
-The practical takeaway: **hooks and settings only ever come from the host repo.** The host is the first repo in your config — deliberately not the directory you happen to be standing in, so this stays predictable. Put the side whose hooks you can't lose first, or pass `--host <repo>`.
+The practical takeaway: **hooks and settings only ever come from the host repo.** The host is the first repo in your config — deliberately not the directory you happen to be standing in, so this stays predictable. If that repo has no worktree for the branch, `link` refuses rather than silently promoting another repo (and changing which hooks load); pass `--host <repo>` to choose deliberately.
 
 ## Backends
 

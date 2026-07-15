@@ -119,6 +119,7 @@ def load_config() -> dict:
         die(f"need at least 2 [[repos]] in {CONFIG}\n\n{EXAMPLE}")
 
     seen: dict[str, str] = {}
+    paths: set[str] = set()
     for r in repos:
         if "path" not in r:
             die("every [[repos]] entry needs a `path`")
@@ -126,10 +127,16 @@ def load_config() -> dict:
         if not p.is_dir():
             die(f"repo path does not exist: {p}")
         r["path"] = str(p.resolve())
-        r["name"] = r.get("name") or p.name
         if not git_ok(r["path"], "rev-parse", "--git-dir"):
             die(f"not a git repo: {r['path']}")
-        # Names must be distinct: they are the directory under <root>/<branch>/.
+        if r["path"] in paths:
+            die(f"duplicate repo path: {r['path']}")
+        paths.add(r["path"])
+
+        r["name"] = r.get("name") or p.name
+        # `name` is a directory component under <root>/<branch>/ — keep it one.
+        if "/" in r["name"] or r["name"] in ("", ".", ".."):
+            die(f"invalid repo name {r['name']!r}: must be a plain directory name")
         if r["name"] in seen:
             die(
                 f"duplicate repo name {r['name']!r} ({seen[r['name']]} and {r['path']}).\n"
@@ -137,6 +144,8 @@ def load_config() -> dict:
             )
         seen[r["name"]] = r["path"]
 
+    if sum(1 for r in repos if r.get("host")) > 1:
+        die("only one [[repos]] entry may set `host = true`")
     repos.sort(key=lambda r: not r.get("host", False))  # host first
     cfg["repos"] = repos
 
@@ -179,24 +188,37 @@ def resolve_agent(cfg: dict) -> dict:
 
 
 # --------------------------------------------------------------------- discovery
-def worktrees_of(repo: str) -> dict[str, str]:
-    """branch -> worktree path, for every usable worktree of `repo`.
+def worktree_records(repo: str) -> list[dict[str, str]]:
+    """Every worktree of `repo` as its raw porcelain attributes.
 
-    Uses -z so paths containing newlines survive. Skips bare/detached worktrees
-    (no branch) and prunable ones (the directory is already gone).
+    -z so paths containing newlines survive.
     """
-    out: dict[str, str] = {}
+    records = []
     for record in git(repo, "worktree", "list", "--porcelain", "-z").split("\0\0"):
         attrs: dict[str, str] = {}
         for field in record.split("\0"):
             if field:
                 key, _, val = field.partition(" ")
                 attrs[key] = val
-        path, branch = attrs.get("worktree"), attrs.get("branch")
-        if not path or not branch or "prunable" in attrs:
-            continue
-        out[branch.removeprefix("refs/heads/")] = path
-    return out
+        if attrs.get("worktree"):
+            records.append(attrs)
+    return records
+
+
+def worktrees_of(repo: str) -> dict[str, str]:
+    """branch -> worktree path, for every usable worktree of `repo`.
+
+    Skips bare/detached worktrees (no branch) and prunable ones (already gone).
+    """
+    return {
+        r["branch"].removeprefix("refs/heads/"): r["worktree"]
+        for r in worktree_records(repo)
+        if r.get("branch") and "prunable" not in r
+    }
+
+
+def is_locked(repo: str, path: str) -> bool:
+    return any("locked" in r for r in worktree_records(repo) if r["worktree"] == path)
 
 
 def sibling_map(cfg: dict, branch: str) -> list[tuple[dict, str | None]]:
@@ -260,7 +282,7 @@ def create_git(cfg: dict, repo: dict, branch: str) -> str:
     return dest
 
 
-def create_orca(repo: dict, branch: str) -> str:
+def create_orca(cfg: dict, repo: dict, branch: str) -> str:
     """Create through Orca, then locate the worktree with git.
 
     We deliberately do NOT parse Orca's JSON for the path: that schema is not a
@@ -268,42 +290,80 @@ def create_orca(repo: dict, branch: str) -> str:
     main checkout. Orca worktrees are ordinary git worktrees, so git is truth.
     """
     sel = repo.get("orca") or f"path:{repo['path']}"
-    run([orca_bin(), "worktree", "create", "--repo", sel, "--name", branch, "--json"])
+    args = [orca_bin(), "worktree", "create", "--repo", sel, "--name", branch, "--json"]
+    base = repo.get("base") or cfg.get("base")
+    if base:
+        args += ["--base-branch", base]
+    run(args)
     path = worktrees_of(repo["path"]).get(branch)
     if not path:
-        die(f"Orca reported success but no worktree for {branch!r} exists in {repo['name']}")
+        # Orca may well have created something we cannot see; don't pretend otherwise.
+        die(
+            f"Orca reported success but no worktree on branch {branch!r} exists in "
+            f"{repo['name']}. Check `orca worktree list` — a worktree may have been "
+            f"created that polytree could not locate, and cannot clean up."
+        )
     return path
 
 
 def is_dirty(worktree: str) -> bool:
     p = subprocess.run(["git", "-C", worktree, "status", "--porcelain"], capture_output=True, text=True)
+    if p.returncode != 0:
+        return True  # can't tell -> assume there is something to lose
     return bool(p.stdout.strip())
 
 
-def remove_worktree(cfg: dict, repo: dict, path: str, force: bool) -> None:
-    """Remove one worktree.
+def removal_blocker(repo: dict, path: str, force: bool) -> str | None:
+    """Why `path` must not be removed, or None. Mirrors what git itself refuses.
 
-    Without `force`, plain `git worktree remove` is used: it refuses to delete a
-    dirty worktree, and that refusal is a feature we must not paper over.
+    Checked up front for every repo so a removal can never do half the set.
     """
-    if not force:
-        p = subprocess.run(["git", "-C", repo["path"], "worktree", "remove", path], capture_output=True, text=True)
-        if p.returncode != 0:
-            die(f"{repo['name']}: refusing to remove {path}\n{p.stderr.strip()}")
-        git(repo["path"], "worktree", "prune", check=False)
-        return
+    if path == repo["path"]:
+        return "is the main checkout"  # git refuses this even with --force
+    if force:
+        return None  # `remove --force --force` handles both locked and dirty
+    if is_locked(repo["path"], path):
+        return "is locked"
+    if is_dirty(path):
+        return "has uncommitted changes"
+    return None
 
+
+def remove_worktree(cfg: dict, repo: dict, path: str, force: bool) -> None:
+    """Remove one worktree, and say so honestly if it did not work."""
     if cfg["backend"] == "orca":
         run([orca_bin(), "worktree", "rm", "--worktree", f"path:{path}", "--force", "--json"], check=False)
     if Path(path).exists():  # Orca may have removed it already
-        git(repo["path"], "worktree", "remove", "--force", path, check=False)
+        # Doubled --force is what git requires to remove a locked worktree.
+        flags = ["--force", "--force"] if force else []
+        p = subprocess.run(
+            ["git", "-C", repo["path"], "worktree", "remove", *flags, path], capture_output=True, text=True
+        )
+        if p.returncode != 0 and Path(path).exists():
+            die(f"{repo['name']}: could not remove {path}\n{p.stderr.strip()}")
     git(repo["path"], "worktree", "prune", check=False)
+    prune_empty_dirs(cfg, path)
+
+
+def prune_empty_dirs(cfg: dict, path: str) -> None:
+    """Drop the now-empty <root>/<branch>/ shell we would otherwise leave behind."""
+    try:
+        root = Path(cfg["root"]).resolve()
+        parent = Path(path).resolve().parent
+        while root in parent.parents and parent.is_dir() and not any(parent.iterdir()):
+            parent.rmdir()
+            parent = parent.parent
+    except OSError:
+        pass
 
 
 def rollback(cfg: dict, created: list[tuple[dict, str]], branch: str) -> None:
-    # force=True is safe here: these worktrees were created seconds ago by us.
+    """Best effort: never let a rollback failure mask the original error."""
     for repo, path in reversed(created):
-        remove_worktree(cfg, repo, path, force=True)
+        try:
+            remove_worktree(cfg, repo, path, force=True)  # safe: we made these seconds ago
+        except Fail:
+            pass
         git(repo["path"], "branch", "-D", branch, check=False)
 
 
@@ -360,12 +420,15 @@ def cmd_new(cfg: dict, a: argparse.Namespace) -> None:
     created: list[tuple[dict, str]] = []
     try:
         for r in cfg["repos"]:
-            path = create_orca(r, branch) if cfg["backend"] == "orca" else create_git(cfg, r, branch)
+            path = create_orca(cfg, r, branch) if cfg["backend"] == "orca" else create_git(cfg, r, branch)
             created.append((r, path))
             info(f"  {r['name']:<20} -> {path}")
     except Fail as e:
         rollback(cfg, created, branch)
-        die(f"{e}\n\nRolled back {len(created)} worktree(s); nothing was left behind.")
+        die(f"{e}\n\nRolled back the {len(created)} worktree(s) polytree had created.")
+    except BaseException:  # Ctrl-C, OSError… a half-made set is still a half-made set
+        rollback(cfg, created, branch)
+        raise
 
     if a.no_launch:
         return
@@ -386,6 +449,14 @@ def cmd_link(cfg: dict, a: argparse.Namespace) -> None:
         )
     if missing:
         info(f"warning: no worktree for {branch!r} in: {', '.join(missing)}")
+    # Never silently promote another repo to host: hooks/settings come from the
+    # host only, so an implicit shift would quietly change what the agent loads.
+    if not a.host and present[0][0] is not cfg["repos"][0]:
+        die(
+            f"the host repo ({cfg['repos'][0]['name']}) has no worktree for {branch!r}.\n"
+            f"Pass --host <repo> to run the agent elsewhere — its hooks and settings "
+            f"are the ones that will load."
+        )
     spec = resolve_agent(cfg)
     _, host_path = pick_host(present, a.host)
     launch(cfg, spec, host_path, [p for _, p in present if p != host_path])
@@ -402,15 +473,16 @@ def cmd_rm(cfg: dict, a: argparse.Namespace) -> None:
     if not present:
         die(f"no worktrees found for branch {a.branch!r}")
 
-    if not a.force:  # preflight: don't remove repo 1 and then bail on repo 2
-        dirty = [r["name"] for r, p in present if is_dirty(p)]
-        if dirty:
-            die(
-                f"uncommitted changes in: {', '.join(dirty)} — nothing was removed.\n"
-                f"Commit or stash them, or re-run with --force to discard them."
-            )
+    # Preflight every repo: removing repo 1 and then bailing on repo 2 is the
+    # same half-a-set failure `new` refuses to make.
+    blocked = [(r["name"], b) for r, p in present if (b := removal_blocker(r, p, a.force))]
+    if blocked:
+        detail = ", ".join(f"{n} ({why})" for n, why in blocked)
+        hint = "" if a.force else "\nCommit or stash them, or re-run with --force to discard them."
+        die(f"cannot remove: {detail} — nothing was removed.{hint}")
+
     for repo, path in present:
-        remove_worktree(cfg, repo, path, force=a.force)
+        remove_worktree(cfg, repo, path, force=a.force)  # raises if it fails
         deleted = git_ok(repo["path"], "branch", "-D" if a.force else "-d", a.branch)
         note = "" if deleted else "  (branch kept: not merged — use --force)"
         info(f"  {repo['name']:<20} removed {path}{note}")

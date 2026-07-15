@@ -59,7 +59,7 @@ class Base(unittest.TestCase):
 
 
 class TestWorktreeParsing(Base):
-    def test_skips_detached_and_bare(self):
+    def test_skips_detached(self):
         """A detached worktree has no branch line; it must not leak into the map."""
         git(self.api, "worktree", "add", "-q", "--detach", str(self.tmp / "det"))
         self.assertNotIn("HEAD", pt.worktrees_of(str(self.api)))
@@ -227,6 +227,141 @@ class TestRm(Base):
         (Path(pt.worktrees_of(str(self.api))["nuke"]) / "dirty.txt").write_text("x")
         pt.cmd_rm(cfg, argparse.Namespace(branch="nuke", force=True))
         self.assertNotIn("nuke", pt.worktrees_of(str(self.api)))
+        self.assertNotIn("nuke", pt.worktrees_of(str(self.web)))
+        self.assertEqual(git(self.api, "branch", "--list", "nuke").strip(), "")
+
+
+class TestAgentValidatedBeforeSideEffects(Base):
+    """The fix is the ORDER: a bad agent must not leave worktrees behind."""
+
+    def test_unknown_agent_creates_nothing(self):
+        cfg = self.write_config()
+        cfg["agent"] = "typo-agent"
+        with self.assertRaises(pt.Fail):
+            pt.cmd_new(cfg, argparse.Namespace(name="x", host=None, no_launch=False))
+        self.assertNotIn("x", pt.worktrees_of(str(self.api)))
+        self.assertNotIn("x", pt.worktrees_of(str(self.web)))
+
+    def test_missing_binary_creates_nothing(self):
+        cfg = self.write_config()
+        cfg["agents"]["fake"]["cmd"] = "definitely-not-a-real-binary-xyz"
+        with self.assertRaises(pt.Fail):
+            pt.cmd_new(cfg, argparse.Namespace(name="y", host=None, no_launch=False))
+        self.assertNotIn("y", pt.worktrees_of(str(self.api)))
+
+
+class TestLockedWorktrees(Base):
+    def test_rm_refuses_locked_and_removes_nothing(self):
+        """git refuses to remove a locked worktree; the preflight must catch it."""
+        cfg = self.write_config()
+        self.new(cfg, "lk")
+        git(self.web, "worktree", "lock", pt.worktrees_of(str(self.web))["lk"])
+        with self.assertRaises(pt.Fail) as e:
+            pt.cmd_rm(cfg, argparse.Namespace(branch="lk", force=False))
+        self.assertIn("is locked", str(e.exception))
+        self.assertIn("lk", pt.worktrees_of(str(self.api)))  # api NOT half-removed
+        self.assertIn("lk", pt.worktrees_of(str(self.web)))
+
+    def test_rm_force_removes_locked(self):
+        cfg = self.write_config()
+        self.new(cfg, "lk2")
+        git(self.web, "worktree", "lock", pt.worktrees_of(str(self.web))["lk2"])
+        pt.cmd_rm(cfg, argparse.Namespace(branch="lk2", force=True))
+        self.assertNotIn("lk2", pt.worktrees_of(str(self.web)))
+
+    def test_rm_never_touches_main_checkout(self):
+        cfg = self.write_config()
+        with self.assertRaises(pt.Fail) as e:
+            pt.cmd_rm(cfg, argparse.Namespace(branch="main", force=True))
+        self.assertIn("main checkout", str(e.exception))
+        self.assertTrue((self.api / ".git").exists())
+
+
+class TestRollbackOnInterrupt(Base):
+    def test_keyboard_interrupt_rolls_back(self):
+        """Ctrl-C mid-create must not leave a half-made set either."""
+        cfg = self.write_config()
+        real = pt.create_git
+        calls = []
+
+        def boom(c, repo, branch):
+            if repo["name"] == "web":
+                raise KeyboardInterrupt
+            calls.append(repo["name"])
+            return real(c, repo, branch)
+
+        pt.create_git = boom
+        self.addCleanup(lambda: setattr(pt, "create_git", real))
+        with self.assertRaises(KeyboardInterrupt):
+            self.new(cfg, "irq")
+        self.assertEqual(calls, ["api"])
+        self.assertNotIn("irq", pt.worktrees_of(str(self.api)))  # rolled back
+
+
+class TestLink(Base):
+    def test_needs_two_worktrees(self):
+        cfg = self.write_config()
+        with self.assertRaises(pt.Fail) as e:
+            pt.cmd_link(cfg, argparse.Namespace(branch="nope", host=None))
+        self.assertIn("need >=2", str(e.exception))
+
+    def test_refuses_to_shift_host_silently(self):
+        """Host (api) lacks the worktree but web+lib have it: 2 present, so the
+        >=2 check passes and the host would silently shift to web. Needs 3 repos
+        to reproduce at all.
+        """
+        lib = make_repo(self.tmp / "repos" / "lib")
+        cfg_file = self.tmp / "three.toml"
+        cfg_file.write_text(
+            f'backend = "git"\nagent = "fake"\nroot = "{self.tmp}/wt3"\n\n'
+            f'[[repos]]\npath = "{self.api}"\nhost = true\n\n'
+            f'[[repos]]\npath = "{self.web}"\n\n[[repos]]\npath = "{lib}"\n\n'
+            f'[agents.fake]\ncmd = "true"\nattach = "--add-dir {{dir}}"\n'
+        )
+        pt.CONFIG = cfg_file
+        cfg = pt.load_config()
+        for r in (self.web, lib):  # only the two non-host repos get a worktree
+            git(r, "worktree", "add", "-q", "-b", "shift2", str(self.tmp / f"s-{r.name}"))
+
+        with self.assertRaises(pt.Fail) as e:
+            pt.cmd_link(cfg, argparse.Namespace(branch="shift2", host=None))
+        self.assertIn("has no worktree", str(e.exception))
+
+    def test_explicit_host_allows_the_shift(self):
+        """--host makes it a decision instead of a silent surprise."""
+        lib = make_repo(self.tmp / "repos" / "lib")
+        cfg_file = self.tmp / "three.toml"
+        cfg_file.write_text(
+            f'backend = "git"\nagent = "fake"\nroot = "{self.tmp}/wt3"\n\n'
+            f'[[repos]]\npath = "{self.api}"\nhost = true\n\n'
+            f'[[repos]]\npath = "{self.web}"\n\n[[repos]]\npath = "{lib}"\n\n'
+            f'[agents.fake]\ncmd = "true"\nattach = "--add-dir {{dir}}"\n'
+        )
+        pt.CONFIG = cfg_file
+        cfg = pt.load_config()
+        for r in (self.web, lib):
+            git(r, "worktree", "add", "-q", "-b", "shift3", str(self.tmp / f"t-{r.name}"))
+        launched = {}
+        real_launch = pt.launch
+        self.addCleanup(lambda: setattr(pt, "launch", real_launch))
+        pt.launch = lambda c, s, host, others: launched.update(host=host, others=others)
+        pt.cmd_link(cfg, argparse.Namespace(branch="shift3", host="web"))
+        self.assertEqual(launched["host"], str(self.tmp / "t-web"))
+        self.assertEqual(launched["others"], [str(self.tmp / "t-lib")])
+
+
+class TestDefaultBase(Base):
+    def test_falls_back_to_local_head(self):
+        """No origin/HEAD (no remote at all) -> use the local default branch."""
+        self.assertEqual(pt.default_base({"path": str(self.api), "name": "api"}), "main")
+
+
+class TestEmptyDirCleanup(Base):
+    def test_rm_leaves_no_empty_shell(self):
+        cfg = self.write_config()
+        self.new(cfg, "shell")
+        pt.cmd_rm(cfg, argparse.Namespace(branch="shell", force=True))
+        self.assertFalse((self.tmp / "wt" / "shell").exists())
 
 
 class TestPickHost(Base):
