@@ -33,6 +33,14 @@ curl -fsSL https://raw.githubusercontent.com/<you>/polytree/main/polytree -o ~/.
 chmod +x ~/.local/bin/polytree
 ```
 
+Hacking on polytree itself? Symlink it instead of copying, so the command always
+runs what's in your checkout:
+
+```bash
+git clone https://github.com/<you>/polytree && cd polytree
+ln -s "$PWD/polytree" ~/.local/bin/polytree
+```
+
 ## Configure
 
 `~/.config/polytree/config.toml`:
