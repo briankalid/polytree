@@ -340,7 +340,14 @@ def create_orca(cfg: dict, repo: dict, branch: str, override: str | None = None,
     main checkout. Orca worktrees are ordinary git worktrees, so git is truth.
     """
     sel = repo.get("orca") or f"path:{repo['path']}"
-    args = [orca_bin(), "worktree", "create", "--repo", sel, "--name", branch, "--json"]
+    # --no-parent: Orca otherwise makes the new worktree a child of whatever
+    # worktree you happen to be standing in, so the same command produces
+    # different lineage depending on your cwd — and only for the repo that
+    # matches it, leaving the set inconsistent with itself. A feature set is
+    # independent work, not a branch stacked on the caller's. (Lineage only;
+    # the git base is unaffected.)
+    args = [orca_bin(), "worktree", "create", "--repo", sel, "--name", branch,
+            "--no-parent", "--json"]
     if issue:
         args += ["--issue", str(issue)]
     if not existing:
