@@ -605,11 +605,24 @@ def cmd_new(cfg: dict, a: argparse.Namespace) -> None:
         if a.existing and not (has_branch or has_remote):
             missing.append(r["name"])
         if not a.existing and (has_branch or has_remote):
-            where = "already exists" if has_branch else "already exists on origin"
+            if worktrees_of(r["path"]).get(branch):
+                die(
+                    f"branch {branch!r} already has a worktree in {r['name']} — nothing was created.\n"
+                    f"`polytree link {branch}` to launch on it, `polytree rm {branch}` to remove it, "
+                    f"or pick another name."
+                )
+            if has_branch:
+                # A lingering local branch with no worktree. `polytree rm` alone keeps
+                # an unmerged branch (git branch -d refuses it), so name the command
+                # that actually clears it — the plain one is exactly what fails here.
+                die(
+                    f"branch {branch!r} already exists in {r['name']} (no worktree) — nothing was created.\n"
+                    f"`polytree new {branch} --existing` to check it out, `polytree rm {branch} --force` "
+                    f"to delete the leftover branch, or pick another name."
+                )
             die(
-                f"branch {branch!r} {where} in {r['name']} — nothing was created.\n"
-                f"Use --existing to check it out, `polytree link {branch}` if the worktrees "
-                f"exist, `polytree rm {branch}` to clean up, or pick another name."
+                f"branch {branch!r} already exists on origin in {r['name']} — nothing was created.\n"
+                f"`polytree new {branch} --existing` to check it out, or pick another name."
             )
         if worktrees_of(r["path"]).get(branch):
             die(f"{r['name']} already has a worktree for {branch!r} — nothing was created")
@@ -708,6 +721,11 @@ def cmd_paths(cfg: dict, a: argparse.Namespace) -> None:
 
 
 def cmd_rm(cfg: dict, a: argparse.Namespace) -> None:
+    a.branch = a.branch or current_branch()  # no branch given -> the set you stand in
+    try:  # captured now: the removals below may delete the dir out from under us
+        here: Path | None = Path.cwd()
+    except OSError:
+        here = None
     # A repo counts if it has a live worktree OR just the branch: someone may have
     # deleted a worktree by hand, or a rollback kept the branch. Skipping those
     # silently left the branch and a stale registration behind, and then `new`
@@ -727,6 +745,33 @@ def cmd_rm(cfg: dict, a: argparse.Namespace) -> None:
         detail = ", ".join(f"{n} ({why})" for n, why in blocked)
         hint = "" if a.force else "\nCommit or stash them, or re-run with --force to discard them."
         die(f"cannot remove: {detail} — nothing was removed.{hint}")
+
+    # Remove the worktree we are standing in LAST. On the orca backend, deleting
+    # it tears down this very terminal — Orca kills the process the moment its
+    # worktree vanishes — so anything still on the list would be stranded. Doing
+    # our own repo last means every sibling is already gone by the time we go.
+    if here:
+        present.sort(key=lambda rp: bool(rp[1]) and (Path(rp[1]) == here or Path(rp[1]) in here.parents))
+
+    # Confirm before destroying anything. polytree links siblings purely by branch
+    # name, so a same-named worktree created independently in another repo looks
+    # exactly like part of the set — showing the list is the only way to catch that
+    # coincidence before it is removed. --yes skips this for scripts.
+    if not getattr(a, "yes", False):
+        info(f"About to remove branch {a.branch!r}:")
+        for repo, path in present:
+            info(f"  {repo['name']:<20} {path or '(branch only, no worktree)'}")
+        if a.force:
+            info("  --force: discards uncommitted changes and deletes the branch even if unmerged.")
+        if not sys.stdin.isatty():
+            die("not a terminal — pass --yes to remove without confirming")
+        try:
+            answer = input("Continue? [y/N] ").strip().lower()
+        except EOFError:
+            answer = ""
+        if answer not in ("y", "yes"):
+            info("aborted — nothing was removed")
+            return
 
     done: list[str] = []
     kept: list[dict] = []
@@ -765,6 +810,12 @@ def cmd_rm(cfg: dict, a: argparse.Namespace) -> None:
         info(f"\nKept unmerged branch {a.branch!r}. To delete it anyway:")
         for repo in kept:
             info(f"  git -C {repo['path']} branch -D {a.branch}")
+
+    # If we just deleted the directory the caller is standing in, their shell is
+    # now in a path that no longer exists. Say so — git worktree remove is silent
+    # about it, and the confusing symptom is the next command failing in the void.
+    if here and any(p and (Path(p) == here or Path(p) in here.parents) for _, p in present):
+        info("\n(You were in a removed worktree — cd elsewhere.)")
 
 
 def cmd_list(cfg: dict, _a: argparse.Namespace) -> None:
@@ -836,10 +887,12 @@ def build_parser() -> argparse.ArgumentParser:
     pa.set_defaults(fn=cmd_paths)
 
     rm = sub.add_parser("rm", help="remove the worktree set for a branch (refuses if dirty/locked)")
-    rm.add_argument("branch")
+    rm.add_argument("branch", nargs="?", help="default: the branch of the current directory")
     rm.add_argument("--force", action="store_true",
                     help="discard uncommitted changes, remove locked worktrees, and delete the "
                          "branch even if unmerged")
+    rm.add_argument("-y", "--yes", action="store_true",
+                    help="skip the confirmation prompt (for scripts)")
     rm.set_defaults(fn=cmd_rm)
 
     li = sub.add_parser("list", help="show your feature sets: branches with a worktree in 2+ repos")

@@ -26,10 +26,28 @@ If your repos always ship in lockstep, a monorepo is probably the right answer a
 
 ## Install
 
-Requires **Python 3.11+** and **git 2.36+** (for `worktree list -z`). No packages to install.
+Requires **Python 3.11+** and **git 2.36+** (for `worktree list -z`). polytree has
+**no third-party dependencies** — it is pure standard library.
+
+**With [pipx](https://pipx.pypa.io) (recommended)** — installs into its own isolated
+environment, on your `PATH`, and upgrades/uninstalls cleanly:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/<you>/polytree/main/polytree -o ~/.local/bin/polytree
+pipx install polytree                                   # once it is on PyPI
+pipx install git+https://github.com/briankalid/polytree      # straight from GitHub
+```
+
+**With pip**, into whatever environment you like:
+
+```bash
+pip install polytree
+```
+
+**Single file, no packaging** — polytree is one self-contained script, so you can
+also just drop it on your `PATH`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/briankalid/polytree/main/polytree -o ~/.local/bin/polytree
 chmod +x ~/.local/bin/polytree
 ```
 
@@ -37,8 +55,18 @@ Hacking on polytree itself? Symlink it instead of copying, so the command always
 runs what's in your checkout:
 
 ```bash
-git clone https://github.com/<you>/polytree && cd polytree
+git clone https://github.com/briankalid/polytree && cd polytree
 ln -s "$PWD/polytree" ~/.local/bin/polytree
+```
+
+### Publishing to PyPI (maintainers)
+
+The version is read straight from the `polytree` script (`VERSION = "…"`), so there
+is nothing else to bump. Build and upload with:
+
+```bash
+python -m build            # writes dist/polytree-<version>-py3-none-any.whl + .tar.gz
+python -m twine upload dist/*
 ```
 
 ## Configure
@@ -83,7 +111,7 @@ git push -u origin <branch>
 | `polytree new <name>` | Create a worktree on branch `<name>` in **every** repo, then launch the agent. If any repo fails, everything is rolled back — you never get half a set |
 | `polytree list` | Your feature sets: every branch with a worktree in 2+ repos, and whether each is clean or dirty |
 | `polytree link [branch]` | Existing worktrees: find the siblings and launch the agent. No branch = the one you're standing in |
-| `polytree rm <branch>` | Remove the worktree set. Checks every repo first and removes nothing if any worktree is dirty, locked, or has populated submodules. `--force` overrides all three and deletes the branch even if unmerged. The main checkout is never removed |
+| `polytree rm [branch]` | Remove the worktree set. No branch = the one you're standing in. Checks every repo first and removes nothing if any worktree is dirty, locked, or has populated submodules. `--force` overrides all three and deletes the branch even if unmerged. The main checkout is never removed |
 | `polytree paths [branch]` | Print the sibling worktree paths. No side effects |
 | `polytree ls` | Show the resolved config (backend, agent, repos) |
 

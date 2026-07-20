@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import importlib.machinery
 import importlib.util
+import os
 import subprocess
 import sys
 import tempfile
@@ -115,14 +116,14 @@ class TestRealBranchShapes(Base):
                     [p for _, p in pt.sibling_map(cfg, name) if p],
                     [pt.worktrees_of(str(r))[name] for r in (self.api, self.web)],
                 )
-                pt.cmd_rm(cfg, argparse.Namespace(branch=name, force=True))
+                pt.cmd_rm(cfg, argparse.Namespace(branch=name, force=True, yes=True))
                 self.assertNotIn(name, pt.worktrees_of(str(self.api)))
 
     def test_nested_slashes_do_not_strand_directories(self):
         """<root>/feat/a/b/c/<repo> is four levels deep; cleanup has to unwind it."""
         cfg = self.write_config()
         self.new(cfg, "feat/a/b/c")
-        pt.cmd_rm(cfg, argparse.Namespace(branch="feat/a/b/c", force=True))
+        pt.cmd_rm(cfg, argparse.Namespace(branch="feat/a/b/c", force=True, yes=True))
         self.assertFalse((self.tmp / "wt" / "feat").exists(), "empty shell left behind")
 
     def test_case_differing_branches_are_not_confused(self):
@@ -239,6 +240,19 @@ class TestNewAndRollback(Base):
         self.assertIn("already exists", str(e.exception))
         self.assertNotIn("collide", pt.worktrees_of(str(self.api)))  # api untouched
 
+    def test_new_on_a_leftover_branch_points_at_rm_force(self):
+        """`rm` keeps an unmerged branch (git branch -d refuses it), so a branch
+        can outlive its worktree. `new` then refuses — and the old hint said
+        `polytree rm`, which is exactly what could not delete it. The hint must
+        name `--force`, or the user is sent in a circle."""
+        git(self.web, "branch", "leftover", "main")  # a branch, no worktree
+        cfg = self.write_config()
+        with self.assertRaises(pt.Fail) as e:
+            self.new(cfg, "leftover")
+        msg = str(e.exception)
+        self.assertIn("no worktree", msg)
+        self.assertIn(f"polytree rm leftover --force", msg)
+
     def test_preflight_rejects_a_bad_base_before_creating_anything(self):
         """A base that doesn't resolve is caught up front, so there is nothing
         to roll back in the first place."""
@@ -283,10 +297,98 @@ class TestRm(Base):
     def test_rm_removes_worktrees_and_branch(self):
         cfg = self.write_config()
         self.new(cfg, "gone")
-        pt.cmd_rm(cfg, argparse.Namespace(branch="gone", force=True))
+        pt.cmd_rm(cfg, argparse.Namespace(branch="gone", force=True, yes=True))
         self.assertNotIn("gone", pt.worktrees_of(str(self.api)))
         self.assertNotIn("gone", pt.worktrees_of(str(self.web)))
         self.assertEqual(git(self.api, "branch", "--list", "gone").strip(), "")
+
+    def test_rm_without_branch_uses_the_current_worktree(self):
+        """No branch arg: remove the set you are standing in, like link/paths.
+        And warn — the shell is left in a directory that no longer exists."""
+        cfg = self.write_config()
+        self.new(cfg, "standing-in")
+        wt = pt.worktrees_of(str(self.api))["standing-in"]
+        orig = os.getcwd()
+        os.chdir(wt)
+        self.addCleanup(lambda: os.chdir(orig))
+        out = []
+        real = pt.info
+        self.addCleanup(lambda: setattr(pt, "info", real))
+        pt.info = out.append
+        pt.cmd_rm(cfg, argparse.Namespace(branch=None, force=True, yes=True))
+        self.assertNotIn("standing-in", pt.worktrees_of(str(self.api)))
+        self.assertNotIn("standing-in", pt.worktrees_of(str(self.web)))
+        self.assertIn("removed worktree", "\n".join(out))  # the cd hint fired
+
+    def _fake_stdin(self, tty: bool):
+        old = sys.stdin
+        sys.stdin = type("S", (), {"isatty": lambda self: tty})()
+        self.addCleanup(lambda: setattr(sys, "stdin", old))
+
+    def _fake_input(self, answer: str):
+        import builtins
+        real = builtins.input
+        self.addCleanup(lambda: setattr(builtins, "input", real))
+        builtins.input = lambda *a, **k: answer
+
+    def test_rm_lists_the_set_and_aborts_on_no(self):
+        """Confirmation is the guard against the branch-name collision: rm links
+        siblings by name alone, so it shows every worktree it would remove and 'n'
+        leaves all of them in place — including a same-named one from another repo."""
+        cfg = self.write_config()
+        self.new(cfg, "confirmset")
+        out = []
+        real = pt.info
+        self.addCleanup(lambda: setattr(pt, "info", real))
+        pt.info = out.append
+        self._fake_stdin(tty=True)
+        self._fake_input("n")
+        pt.cmd_rm(cfg, argparse.Namespace(branch="confirmset", force=True, yes=False))
+        text = "\n".join(out)
+        self.assertIn("About to remove", text)
+        self.assertIn("api", text)
+        self.assertIn("web", text)  # the set is shown before anything is touched
+        self.assertIn("aborted", text)
+        self.assertIn("confirmset", pt.worktrees_of(str(self.api)))  # nothing removed
+        self.assertIn("confirmset", pt.worktrees_of(str(self.web)))
+
+    def test_rm_proceeds_on_yes(self):
+        cfg = self.write_config()
+        self.new(cfg, "confirmyes")
+        self._fake_stdin(tty=True)
+        self._fake_input("y")
+        pt.cmd_rm(cfg, argparse.Namespace(branch="confirmyes", force=True, yes=False))
+        self.assertNotIn("confirmyes", pt.worktrees_of(str(self.api)))
+        self.assertNotIn("confirmyes", pt.worktrees_of(str(self.web)))
+
+    def test_rm_without_yes_refuses_when_not_a_terminal(self):
+        """No TTY and no --yes: refuse rather than remove something unconfirmed."""
+        cfg = self.write_config()
+        self.new(cfg, "noterm")
+        self._fake_stdin(tty=False)
+        with self.assertRaises(pt.Fail) as e:
+            pt.cmd_rm(cfg, argparse.Namespace(branch="noterm", force=True, yes=False))
+        self.assertIn("--yes", str(e.exception))
+        self.assertIn("noterm", pt.worktrees_of(str(self.api)))  # untouched
+
+    def test_rm_removes_the_callers_own_worktree_last(self):
+        """On the orca backend, deleting the worktree you're standing in tears down
+        this very terminal (Orca kills the process the moment its worktree vanishes),
+        stranding any sibling not yet reached. So the caller's own worktree must go
+        last — even when it is the host, which is otherwise removed first."""
+        cfg = self.write_config()
+        self.new(cfg, "order")
+        api_wt = pt.worktrees_of(str(self.api))["order"]  # host: normally removed first
+        removed_order = []
+        real = pt.remove_worktree
+        self.addCleanup(lambda: setattr(pt, "remove_worktree", real))
+        pt.remove_worktree = lambda c, repo, path, force: (removed_order.append(repo["name"]),
+                                                           real(c, repo, path, force))[1]
+        orig = os.getcwd()
+        os.chdir(api_wt)
+        self.addCleanup(lambda: os.chdir(orig))
+        pt.cmd_rm(cfg, argparse.Namespace(branch=None, force=True, yes=True))
+        self.assertEqual(removed_order, ["web", "api"])  # caller (host) went last
 
     def test_backend_deleting_the_branch_does_not_lose_unmerged_work(self):
         """`orca worktree rm` deletes the branch too, merged or not. Without
@@ -306,7 +408,7 @@ class TestRm(Base):
 
         pt.remove_worktree = orca_like
         self.addCleanup(lambda: setattr(pt, "remove_worktree", real))
-        pt.cmd_rm(cfg, argparse.Namespace(branch="keepme", force=False))
+        pt.cmd_rm(cfg, argparse.Namespace(branch="keepme", force=False, yes=True))
 
         self.assertNotIn("keepme", pt.worktrees_of(str(self.api)))  # worktree gone
         self.assertTrue(pt.branch_exists(cfg["repos"][0], "keepme"))  # unmerged branch restored
@@ -317,7 +419,7 @@ class TestRm(Base):
         self.new(cfg, "bye")
         git(pt.worktrees_of(str(self.api))["bye"], "-c", "user.email=t@t", "-c", "user.name=t",
             "commit", "-q", "--allow-empty", "-m", "unmerged")
-        pt.cmd_rm(cfg, argparse.Namespace(branch="bye", force=True))
+        pt.cmd_rm(cfg, argparse.Namespace(branch="bye", force=True, yes=True))
         self.assertFalse(pt.branch_exists(cfg["repos"][0], "bye"))
 
     def test_rm_reports_the_kept_branch_and_how_to_drop_it(self):
@@ -331,7 +433,7 @@ class TestRm(Base):
         real = pt.info
         self.addCleanup(lambda: setattr(pt, "info", real))
         pt.info = out.append
-        pt.cmd_rm(cfg, argparse.Namespace(branch="keptnote", force=False))
+        pt.cmd_rm(cfg, argparse.Namespace(branch="keptnote", force=False, yes=True))
         text = "\n".join(out)
         self.assertIn("branch kept: not merged", text)
         self.assertIn(f"git -C {self.api} branch -D keptnote", text)  # a command that works
@@ -344,14 +446,14 @@ class TestRm(Base):
         real = pt.info
         self.addCleanup(lambda: setattr(pt, "info", real))
         pt.info = out.append
-        pt.cmd_rm(cfg, argparse.Namespace(branch="gonenote", force=False))
+        pt.cmd_rm(cfg, argparse.Namespace(branch="gonenote", force=False, yes=True))
         self.assertNotIn("branch kept", "\n".join(out))
         self.assertFalse(pt.branch_exists(cfg["repos"][0], "gonenote"))
 
     def test_rm_unknown_branch_fails(self):
         cfg = self.write_config()
         with self.assertRaises(pt.Fail):
-            pt.cmd_rm(cfg, argparse.Namespace(branch="never", force=False))
+            pt.cmd_rm(cfg, argparse.Namespace(branch="never", force=False, yes=True))
 
     def test_rm_refuses_to_destroy_uncommitted_work(self):
         """Without --force, git refuses to remove a dirty worktree. Don't override that."""
@@ -360,7 +462,7 @@ class TestRm(Base):
         wt = pt.worktrees_of(str(self.api))["wip"]
         (Path(wt) / "IMPORTANT.txt").write_text("uncommitted work")
         with self.assertRaises(pt.Fail) as e:
-            pt.cmd_rm(cfg, argparse.Namespace(branch="wip", force=False))
+            pt.cmd_rm(cfg, argparse.Namespace(branch="wip", force=False, yes=True))
         self.assertIn("uncommitted changes", str(e.exception))
         self.assertTrue((Path(wt) / "IMPORTANT.txt").exists())  # survived
         self.assertIn("wip", pt.worktrees_of(str(self.api)))
@@ -371,7 +473,7 @@ class TestRm(Base):
         self.new(cfg, "half")
         (Path(pt.worktrees_of(str(self.web))["half"]) / "dirty.txt").write_text("x")
         with self.assertRaises(pt.Fail):
-            pt.cmd_rm(cfg, argparse.Namespace(branch="half", force=False))
+            pt.cmd_rm(cfg, argparse.Namespace(branch="half", force=False, yes=True))
         self.assertIn("half", pt.worktrees_of(str(self.api)))  # untouched
         self.assertIn("half", pt.worktrees_of(str(self.web)))
 
@@ -379,7 +481,7 @@ class TestRm(Base):
         cfg = self.write_config()
         self.new(cfg, "nuke")
         (Path(pt.worktrees_of(str(self.api))["nuke"]) / "dirty.txt").write_text("x")
-        pt.cmd_rm(cfg, argparse.Namespace(branch="nuke", force=True))
+        pt.cmd_rm(cfg, argparse.Namespace(branch="nuke", force=True, yes=True))
         self.assertNotIn("nuke", pt.worktrees_of(str(self.api)))
         self.assertNotIn("nuke", pt.worktrees_of(str(self.web)))
         self.assertEqual(git(self.api, "branch", "--list", "nuke").strip(), "")
@@ -411,7 +513,7 @@ class TestLockedWorktrees(Base):
         self.new(cfg, "lk")
         git(self.web, "worktree", "lock", pt.worktrees_of(str(self.web))["lk"])
         with self.assertRaises(pt.Fail) as e:
-            pt.cmd_rm(cfg, argparse.Namespace(branch="lk", force=False))
+            pt.cmd_rm(cfg, argparse.Namespace(branch="lk", force=False, yes=True))
         self.assertIn("is locked", str(e.exception))
         self.assertIn("lk", pt.worktrees_of(str(self.api)))  # api NOT half-removed
         self.assertIn("lk", pt.worktrees_of(str(self.web)))
@@ -420,7 +522,7 @@ class TestLockedWorktrees(Base):
         cfg = self.write_config()
         self.new(cfg, "lk2")
         git(self.web, "worktree", "lock", pt.worktrees_of(str(self.web))["lk2"])
-        pt.cmd_rm(cfg, argparse.Namespace(branch="lk2", force=True))
+        pt.cmd_rm(cfg, argparse.Namespace(branch="lk2", force=True, yes=True))
         self.assertNotIn("lk2", pt.worktrees_of(str(self.web)))
 
     def test_rm_refuses_populated_submodules_and_removes_nothing(self):
@@ -440,7 +542,7 @@ class TestLockedWorktrees(Base):
         self.assertFalse(pt.is_dirty(wt))  # clean: is_dirty would never catch this
 
         with self.assertRaises(pt.Fail) as e:
-            pt.cmd_rm(cfg, argparse.Namespace(branch="sm", force=False))
+            pt.cmd_rm(cfg, argparse.Namespace(branch="sm", force=False, yes=True))
         self.assertIn("populated submodules", str(e.exception))
         self.assertIn("sm", pt.worktrees_of(str(self.api)))  # api NOT half-removed
         self.assertIn("sm", pt.worktrees_of(str(self.web)))
@@ -448,7 +550,7 @@ class TestLockedWorktrees(Base):
     def test_rm_never_touches_main_checkout(self):
         cfg = self.write_config()
         with self.assertRaises(pt.Fail) as e:
-            pt.cmd_rm(cfg, argparse.Namespace(branch="main", force=True))
+            pt.cmd_rm(cfg, argparse.Namespace(branch="main", force=True, yes=True))
         self.assertIn("main checkout", str(e.exception))
         self.assertTrue((self.api / ".git").exists())
 
@@ -549,7 +651,7 @@ class TestEmptyDirCleanup(Base):
     def test_rm_leaves_no_empty_shell(self):
         cfg = self.write_config()
         self.new(cfg, "shell")
-        pt.cmd_rm(cfg, argparse.Namespace(branch="shell", force=True))
+        pt.cmd_rm(cfg, argparse.Namespace(branch="shell", force=True, yes=True))
         self.assertFalse((self.tmp / "wt" / "shell").exists())
 
 
@@ -1028,7 +1130,7 @@ class TestBrokenWorldRecovery(Base):
         cfg = self.write_config()
         self.new(cfg, "halfgone")
         subprocess.run(["rm", "-rf", pt.worktrees_of(str(self.api))["halfgone"]])
-        pt.cmd_rm(cfg, argparse.Namespace(branch="halfgone", force=True))
+        pt.cmd_rm(cfg, argparse.Namespace(branch="halfgone", force=True, yes=True))
         self.assertNotIn("halfgone", pt.worktrees_of(str(self.web)))
         self.assertNotIn("halfgone", pt.local_branches(cfg["repos"][0]))  # damaged repo too
         self.assertNotIn("halfgone", pt.local_branches(cfg["repos"][1]))
@@ -1053,7 +1155,7 @@ class TestBrokenWorldRecovery(Base):
         sibling = Path(cfg["root"]) / "keepdir" / "something-of-mine"
         sibling.mkdir()
         (sibling / "file.txt").write_text("mine")
-        pt.cmd_rm(cfg, argparse.Namespace(branch="keepdir", force=True))
+        pt.cmd_rm(cfg, argparse.Namespace(branch="keepdir", force=True, yes=True))
         self.assertTrue(sibling.exists(), "cleanup deleted a directory it did not create")
 
 

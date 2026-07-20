@@ -29,7 +29,7 @@ def commit(repo, msg):
         "--allow-empty", "-m", msg)
 
 
-class FableBase(Base):
+class HardeningBase(Base):
     def capture(self) -> list:
         """Route pt.info into a list; restored automatically."""
         out = []
@@ -39,7 +39,7 @@ class FableBase(Base):
         return out
 
     def load_raw(self, text: str) -> dict:
-        cfgf = self.tmp / "fable.toml"
+        cfgf = self.tmp / "config.toml"
         cfgf.write_text(text)
         pt.CONFIG = cfgf
         return pt.load_config()
@@ -63,7 +63,7 @@ class FableBase(Base):
         os.chdir(path)
 
 
-class TestRealBranchShapes(FableBase):
+class TestRealBranchShapes(HardeningBase):
     """Every past test used lowercase, slash-free branch names. The user's real
     branches look like 'Msf/merge-in-to-dev' — capitals, underscores, slashes."""
 
@@ -91,7 +91,7 @@ class TestRealBranchShapes(FableBase):
                 out = self.capture()
                 pt.cmd_list(cfg, argparse.Namespace())
                 self.assertIn(name, "\n".join(out))
-                pt.cmd_rm(cfg, argparse.Namespace(branch=name, force=True))
+                pt.cmd_rm(cfg, argparse.Namespace(branch=name, force=True, yes=True))
                 self.assertNotIn(name, pt.worktrees_of(str(self.api)))
                 self.assertFalse(pt.branch_exists(cfg["repos"][0], name))
         # nested shells (wt/Msf, wt/chore) pruned; the root itself survives
@@ -105,7 +105,7 @@ class TestRealBranchShapes(FableBase):
         self.new(cfg, name)
         self.assertIn(name, pt.worktrees_of(str(self.api)))
         self.assertIn(name, pt.worktrees_of(str(self.web)))
-        pt.cmd_rm(cfg, argparse.Namespace(branch=name, force=True))
+        pt.cmd_rm(cfg, argparse.Namespace(branch=name, force=True, yes=True))
         self.assertNotIn(name, pt.worktrees_of(str(self.api)))
         self.assertFalse((self.tmp / "wt" / "área").exists())
 
@@ -117,7 +117,7 @@ class TestRealBranchShapes(FableBase):
                 pt.check_branch_name(bad)
 
 
-class TestBaseRefForms(FableBase):
+class TestBaseRefForms(HardeningBase):
     """--base and `base =` are documented as taking a REF, and a ref is not
     always a branch name: hotfixes start from tags and bisected SHAs."""
 
@@ -165,7 +165,7 @@ class TestBaseRefForms(FableBase):
         self.assertNotIn("sha-everywhere", pt.worktrees_of(str(self.api)))
 
 
-class TestDefaultBaseResolution(FableBase):
+class TestDefaultBaseResolution(HardeningBase):
     """default_base is the fallback when nobody configured a base. Its order
     (origin/HEAD, then local HEAD, then die) decides what a feature branches off."""
 
@@ -191,7 +191,7 @@ class TestDefaultBaseResolution(FableBase):
         self.assertIn("remote set-head origin -a", str(e.exception))
 
 
-class TestCmdPaths(FableBase):
+class TestCmdPaths(HardeningBase):
     """cmd_paths had zero coverage; scripts consume its output, so the output
     IS the interface."""
 
@@ -248,7 +248,7 @@ class TestCmdPaths(FableBase):
         self.assertIn("detached HEAD", str(e.exception))
 
 
-class TestCmdLs(FableBase):
+class TestCmdLs(HardeningBase):
     """cmd_ls had zero coverage. It exists to answer 'what will polytree do?',
     so it must show the RESOLVED config: backend, agent, root, and who hosts."""
 
@@ -267,7 +267,7 @@ class TestCmdLs(FableBase):
         self.assertNotIn("*", web_line)
 
 
-class TestHostFlagValidation(FableBase):
+class TestHostFlagValidation(HardeningBase):
     def test_new_with_unknown_host_creates_nothing(self):
         """KNOWN-FAILING at cd70bcc (finding). --host is only validated AFTER
         every worktree has been created: `polytree new f --host typo` builds the
@@ -300,7 +300,7 @@ class TestHostFlagValidation(FableBase):
         self.assertIn("web", str(e.exception))
 
 
-class TestPrPrereqs(FableBase):
+class TestPrPrereqs(HardeningBase):
     def test_pr_without_gh_dies_before_touching_anything(self):
         """--pr on a machine without the GitHub CLI must say exactly that,
         up front — not fall through to a confusing resolution failure, and
@@ -316,7 +316,7 @@ class TestPrPrereqs(FableBase):
         self.assertEqual(list(pt.worktrees_of(str(self.web))), ["main"])
 
 
-class TestManuallyDeletedWorktrees(FableBase):
+class TestManuallyDeletedWorktrees(HardeningBase):
     """`rm -rf` on a worktree directory is what users actually do. Git then
     calls the worktree 'prunable' but keeps the registration AND the branch."""
 
@@ -330,7 +330,7 @@ class TestManuallyDeletedWorktrees(FableBase):
         cfg = self.write_config()
         self.new(cfg, "torn")
         subprocess.run(["rm", "-rf", pt.worktrees_of(str(self.api))["torn"]])
-        pt.cmd_rm(cfg, argparse.Namespace(branch="torn", force=True))
+        pt.cmd_rm(cfg, argparse.Namespace(branch="torn", force=True, yes=True))
         self.assertFalse(pt.branch_exists(cfg["repos"][0], "torn"),
                          "rm --force left the branch behind in the repo whose "
                          "worktree directory had been deleted by hand")
@@ -377,7 +377,7 @@ class TestManuallyDeletedWorktrees(FableBase):
         self.assertTrue(pt.branch_exists(cfg["repos"][1], "stale"))
 
 
-class TestPruneEmptyDirsSafety(FableBase):
+class TestPruneEmptyDirsSafety(HardeningBase):
     """prune_empty_dirs walks UPWARD deleting directories. The interesting
     property is what it must NOT delete."""
 
@@ -388,14 +388,14 @@ class TestPruneEmptyDirsSafety(FableBase):
         self.new(cfg, "noted")
         stray = self.tmp / "wt" / "noted" / "NOTES.txt"
         stray.write_text("do not lose me")
-        pt.cmd_rm(cfg, argparse.Namespace(branch="noted", force=True))
+        pt.cmd_rm(cfg, argparse.Namespace(branch="noted", force=True, yes=True))
         self.assertNotIn("noted", pt.worktrees_of(str(self.api)))  # worktrees gone
         self.assertEqual(stray.read_text(), "do not lose me")
 
     def test_the_root_itself_is_never_removed(self):
         cfg = self.write_config()
         self.new(cfg, "only-set")
-        pt.cmd_rm(cfg, argparse.Namespace(branch="only-set", force=True))
+        pt.cmd_rm(cfg, argparse.Namespace(branch="only-set", force=True, yes=True))
         self.assertTrue((self.tmp / "wt").is_dir())
 
     def test_never_climbs_out_of_the_root(self):
@@ -409,7 +409,7 @@ class TestPruneEmptyDirsSafety(FableBase):
         self.assertTrue((self.tmp / "elsewhere").is_dir())
 
 
-class TestSymlinkedRepoPaths(FableBase):
+class TestSymlinkedRepoPaths(HardeningBase):
     """Config paths through symlinks (~/code -> /mnt/big/code is common)."""
 
     def test_symlink_and_its_target_are_the_same_repo(self):
@@ -441,7 +441,7 @@ class TestSymlinkedRepoPaths(FableBase):
                          str(self.tmp / "wt" / "via-link" / "api-ln"))
 
 
-class TestConfigRejections(FableBase):
+class TestConfigRejections(HardeningBase):
     """Broken configs must die with a message, not half-work."""
 
     def test_broken_toml(self):
@@ -530,7 +530,7 @@ class TestConfigRejections(FableBase):
         self.assertEqual(env, {"LEVEL": "3"})
 
 
-class TestQuotingAndPrompts(FableBase):
+class TestQuotingAndPrompts(HardeningBase):
     def test_prompt_is_one_argument_and_never_a_template(self):
         """A prompt is user prose: quotes must not split it and a literal
         '{dir}' inside it must NOT be expanded like the attach template."""
@@ -573,7 +573,7 @@ class TestQuotingAndPrompts(FableBase):
                          ["FOO=a b", "true", "--add-dir", other, 'line one\nline "two"'])
 
 
-class TestMiscHardening(FableBase):
+class TestMiscHardening(HardeningBase):
     def test_remove_worktree_keeping_branch_tolerates_a_missing_branch(self):
         """Called with a branch that never existed (Orca made none, or it is
         already gone): the worktree must still be removed, without crashing and
