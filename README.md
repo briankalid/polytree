@@ -43,21 +43,8 @@ pipx install polytree
 pip install polytree
 ```
 
-**Or just the single file** — no packaging needed, since polytree is one
-self-contained script:
-
-```bash
-mkdir -p ~/.local/bin
-curl -fsSL https://raw.githubusercontent.com/briankalid/polytree/main/polytree -o ~/.local/bin/polytree
-chmod +x ~/.local/bin/polytree
-```
-
-If `~/.local/bin` isn't already on your `PATH` (common on macOS), add it — for
-bash or zsh:
-
-```bash
-echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc   # or ~/.bashrc
-```
+Either way you get the `polytree` command on your `PATH` — nothing to move by
+hand.
 
 Hacking on polytree itself? Symlink it instead of copying, so the command always
 runs what's in your checkout:
