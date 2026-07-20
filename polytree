@@ -24,7 +24,7 @@ import sys
 import tomllib
 from pathlib import Path
 
-VERSION = "0.1.0"
+VERSION = "0.1.1"
 CONFIG = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "polytree" / "config.toml"
 
 # Built-in agent adapters. Anything here can be overridden/extended from config.
