@@ -139,6 +139,48 @@ What this does *not* do is attach the PR to Orca's card: that badge is metadata 
 
 Both also take `--agent <name>` to override the configured agent for one run, and `--prompt "..."` to hand the agent its task on startup. On the orca backend, `new --issue <n>` links the worktrees to a GitHub issue.
 
+### All the flags
+
+**`new [name]`** — create the set and launch the agent:
+
+| Flag | What it does |
+|---|---|
+| `--host REPO` | Repo that hosts the agent (default: first in config) |
+| `--base REF` | Branch off this ref instead of the configured base, e.g. `--base origin/master` for a hotfix. Same ref in every repo |
+| `--existing` | Check out a branch that already exists (locally or on `origin`) instead of creating one |
+| `--pr [REPO#]N` | Take the branch from a GitHub PR — implies `--existing`; needs [`gh`](https://cli.github.com/). Qualify as `repo#n`, or plain `n` for the host repo |
+| `--issue N` | Link the worktrees to a GitHub issue (orca backend only) |
+| `--agent NAME` | Use this agent for the run, overriding the config |
+| `--prompt TEXT` | Hand the agent an initial prompt on startup |
+| `--no-launch` | Create the worktrees, don't start the agent |
+
+**`link [branch]`** — launch the agent on an existing set (no branch = the one you're standing in):
+
+| Flag | What it does |
+|---|---|
+| `--host REPO` | Repo that hosts the agent (default: first in config) |
+| `--agent NAME` | Use this agent for the run, overriding the config |
+| `--prompt TEXT` | Hand the agent an initial prompt on startup |
+
+**`rm [branch]`** — remove the set (no branch = the one you're standing in):
+
+| Flag | What it does |
+|---|---|
+| `--force` | Discard uncommitted changes, remove locked worktrees, and delete the branch even if unmerged |
+| `-y`, `--yes` | Skip the confirmation prompt (for scripts) |
+
+**`paths [branch]`**, **`list`**, and **`ls`** take no flags; `paths` and `list` have no side effects. Every command has `-h/--help`, and `polytree --version` prints the version.
+
+**Two agents on one set.** Because `link` only attaches — it never creates — you can run it more than once. Point Claude at the set in one terminal and Codex in another, both seeing the same worktrees:
+
+```bash
+polytree new feature --no-launch        # create the set once
+polytree link feature --agent claude    # terminal 1
+polytree link feature --agent codex     # terminal 2
+```
+
+They share the same files, so split the work (say, one per repo) to avoid stepping on each other.
+
 ### new, new --existing, or link?
 
 | The branch… | The worktrees… | Use |
