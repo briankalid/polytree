@@ -230,7 +230,16 @@ Discovery is always plain git, so `polytree link`, `paths` and `rm` work on work
 
 ## Any agent
 
-`claude` and `codex` ship built in. Any agent that accepts extra roots works via config alone — no code changes:
+**The requirement:** the agent must take one or more extra directories on its command line. If it accepts multiple roots, polytree can drive it; if it can't, it can't be linked — that's the one thing no wrapper fixes.
+
+**Built in** (no config needed):
+
+| Agent | `agent =` | How the sibling repos attach |
+|---|---|---|
+| **Claude Code** | `claude` | `--add-dir` per repo, `--mcp-config` for each `.mcp.json`, plus `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1` so their `CLAUDE.md` loads |
+| **Codex** | `codex` | `--add-dir` per repo (it reads `AGENTS.md` across the roots on its own) |
+
+Pick one with `agent =` in the config, or per run with `--agent`. **Anything else** that accepts extra roots works from config alone — no code changes:
 
 ```toml
 [agents.my-agent]
@@ -241,8 +250,6 @@ attach_if_exists = { ".mcp.json" = "--mcp-config {dir}/.mcp.json" }   # optional
 ```
 
 `{dir}` is substituted per attached directory; `attach_if_exists` only fires when that file is present in the attached repo.
-
-The one thing no wrapper can fix: an agent that can't accept multiple roots at all can't be linked.
 
 ## Notes on the workflow
 
