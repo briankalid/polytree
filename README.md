@@ -149,6 +149,13 @@ Both also take `--agent <name>` to override the configured agent for one run, an
 
 `link` never creates anything; it only attaches the agent to worktrees that are already there.
 
+> **Coming back to a set? Use `polytree link` — not the agent directly.**
+> The extra repos are attached with launch-time flags (`--add-dir`, `--mcp-config`,
+> the `CLAUDE.md` env var). Once you quit that session, they're gone. Running plain
+> `claude` (or `codex`, or whatever agent) again starts a session that sees **only
+> the repo you're standing in** — the siblings are not re-attached. `polytree link`
+> rebuilds the exact same launch, so the agent sees the whole set again.
+
 ## What your agent actually picks up
 
 This is the part nobody documents in one place. When a second repo is attached as an extra directory, **most of its configuration is silently ignored**. `polytree` works around what it can and is honest about the rest.
