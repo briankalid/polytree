@@ -239,17 +239,47 @@ Discovery is always plain git, so `polytree link`, `paths` and `rm` work on work
 | **Claude Code** | `claude` | `--add-dir` per repo, `--mcp-config` for each `.mcp.json`, plus `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1` so their `CLAUDE.md` loads |
 | **Codex** | `codex` | `--add-dir` per repo (it reads `AGENTS.md` across the roots on its own) |
 
-Pick one with `agent =` in the config, or per run with `--agent`. **Anything else** that accepts extra roots works from config alone — no code changes:
+Pick a built-in with `agent =` in the config, or per run with `--agent`.
+
+### Adding your own agent
+
+Any other agent works from config alone — no code changes. You describe it once under `[agents.<name>]`, then select it with `agent = "<name>"` (config) or `--agent <name>` (one run).
+
+**Step 1 — find its "extra directory" flag.** polytree launches the agent inside the host repo and hands it the *other* repos as extra roots, so the agent needs a command-line flag that adds a directory to its workspace. Run the agent's `--help` and look for one — it's usually called `--add-dir`, `--root`, `--dir`, `--include`, or `--workspace`. It must be **repeatable** (you can pass it more than once), because polytree uses it once per sibling repo. If the agent can't take extra directories at all, it can't be driven — that's the one hard limit.
+
+**Step 2 — describe it in the config.** The minimum is one line, `attach`. For an imaginary agent `acme` whose flag is `--root`:
 
 ```toml
-[agents.my-agent]
-cmd    = "my-agent --fast"                 # optional; defaults to the table key
-attach = "--root {dir}"                    # required: how it takes an extra directory
-env    = { MY_AGENT_EXTRA = "1" }          # optional
-attach_if_exists = { ".mcp.json" = "--mcp-config {dir}/.mcp.json" }   # optional
+[agents.acme]
+attach = "--root {dir}"    # required: the flag that adds ONE extra directory
 ```
 
-`{dir}` is substituted per attached directory; `attach_if_exists` only fires when that file is present in the attached repo.
+All the keys you can set:
+
+| Key | Required? | What it does |
+|---|---|---|
+| `attach` | **yes** | The flag that adds one extra directory. `{dir}` is replaced with each sibling repo's absolute path |
+| `cmd` | no | How to start the agent. Defaults to the table name (here, `acme`). Put base flags here, e.g. `"acme --model fast"` |
+| `env` | no | Environment variables set for the run, as a table: `{ ACME_TELEMETRY = "0" }` |
+| `attach_if_exists` | no | Extra flags added **only** when a file exists in a sibling, as `{ "filename" = "flag {dir}" }` |
+
+**How `attach` expands.** polytree substitutes `{dir}` and repeats the flag once per attached repo. Launching `acme` on a set with two siblings runs:
+
+```console
+acme --root /home/you/polytree/feature/web --root /home/you/polytree/feature/mobile
+```
+
+The **host repo is the working directory** — it is not attached; only the siblings are. And `attach_if_exists` is checked per file, per sibling: `{ ".mcp.json" = "--mcp-config {dir}/.mcp.json" }` adds `--mcp-config <repo>/.mcp.json` for each sibling that actually has an `.mcp.json`, and nothing for those that don't.
+
+A fuller example, using every key:
+
+```toml
+[agents.acme]
+cmd    = "acme --model fast"                                # optional: base flags for every launch
+attach = "--root {dir}"                                     # required
+env    = { ACME_TELEMETRY = "0" }                           # optional
+attach_if_exists = { ".mcp.json" = "--mcp-config {dir}/.mcp.json" }   # optional
+```
 
 ## Notes on the workflow
 
