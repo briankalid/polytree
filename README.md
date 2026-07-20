@@ -30,7 +30,21 @@ Runs on **macOS and Linux**. Requires **Python 3.11+** and **git 2.36+** (for
 `worktree list -z`). polytree has **no third-party dependencies** — it is pure
 standard library, one self-contained script.
 
-Drop it on your `PATH`:
+**With [pipx](https://pipx.pypa.io) (recommended)** — isolated, on your `PATH`,
+and clean to upgrade or remove:
+
+```bash
+pipx install polytree
+```
+
+**With pip**:
+
+```bash
+pip install polytree
+```
+
+**Or just the single file** — no packaging needed, since polytree is one
+self-contained script:
 
 ```bash
 mkdir -p ~/.local/bin
@@ -51,6 +65,16 @@ runs what's in your checkout:
 ```bash
 git clone https://github.com/briankalid/polytree && cd polytree
 ln -s "$PWD/polytree" ~/.local/bin/polytree
+```
+
+### Publishing to PyPI (maintainers)
+
+The version is read straight from the `polytree` script (`VERSION = "…"`), so
+there is nothing else to bump. Build and upload with:
+
+```bash
+python -m build            # writes dist/polytree-<version>-py3-none-any.whl + .tar.gz
+python -m twine upload dist/*
 ```
 
 ## Configure

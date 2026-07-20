@@ -1,0 +1,43 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "polytree"
+description = "One feature, many repos: the same branch everywhere, one agent that sees it all."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.11"
+authors = [{ name = "briankalid" }]
+keywords = ["git", "worktree", "monorepo", "agent", "cli", "orca"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Software Development :: Version Control :: Git",
+]
+# No third-party dependencies: pure standard library (tomllib needs 3.11+).
+dependencies = []
+dynamic = ["version"]
+
+[project.urls]
+Homepage = "https://github.com/briankalid/polytree"
+Source = "https://github.com/briankalid/polytree"
+
+[project.scripts]
+polytree = "polytree:main"
+
+# The source of truth is the single executable file `polytree` (kept so the
+# curl-install still works). Read the version straight out of it, and ship it
+# into the wheel as an importable module so the console entry point resolves.
+[tool.hatch.version]
+path = "polytree"
+pattern = 'VERSION = "(?P<version>[^"]+)"'
+
+[tool.hatch.build.targets.wheel]
+force-include = { "polytree" = "polytree.py" }
+
+[tool.hatch.build.targets.sdist]
+include = ["polytree", "README.md", "LICENSE", "pyproject.toml", "config.example.toml", "tests"]
