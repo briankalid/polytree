@@ -1354,12 +1354,12 @@ class _ExecCalled(Exception):
 
 
 class TestShellAfterAgent(Base):
-    def _spy_launch(self, cfg, host):
+    def _spy_launch(self, cfg, host, tty=True):
         events = {}
-        real_run, real_exec, real_isatty = pt.subprocess.run, pt.os.execvpe, sys.stdin
+        real_run, real_exec, real_stdin = pt.subprocess.run, pt.os.execvpe, sys.stdin
         self.addCleanup(lambda: (setattr(pt.subprocess, "run", real_run),
                                  setattr(pt.os, "execvpe", real_exec),
-                                 setattr(sys, "stdin", real_isatty)))
+                                 setattr(sys, "stdin", real_stdin)))
 
         def fake_run(argv, env=None, **k):
             events["agent"] = argv
@@ -1371,7 +1371,7 @@ class TestShellAfterAgent(Base):
 
         pt.subprocess.run = fake_run
         pt.os.execvpe = fake_exec
-        sys.stdin = type("S", (), {"isatty": lambda self: True})()
+        sys.stdin = type("S", (), {"isatty": lambda self: tty})()
         orig = os.getcwd()
         self.addCleanup(lambda: os.chdir(orig))
         with self.assertRaises(_ExecCalled):
@@ -1417,6 +1417,28 @@ class TestShellAfterAgent(Base):
         events = self._spy_launch(cfg, host)
         self.assertNotIn("agent", events)          # not run as a subprocess
         self.assertEqual(events["exec"][0], "true")  # exec'd directly, same shell on exit
+
+    def test_no_subshell_without_a_tty(self):
+        """The isatty guard: scripted/non-interactive runs must never spawn a shell,
+        even with subshell=true — they exec the agent directly, preserving exit code."""
+        self._set_env("POLYTREE_SHELL", None)
+        cfg = self.write_config()
+        cfg["subshell"] = True
+        self.new(cfg, "notty")
+        host = pt.worktrees_of(str(self.api))["notty"]
+        events = self._spy_launch(cfg, host, tty=False)
+        self.assertNotIn("agent", events)          # no subprocess, no shell
+        self.assertEqual(events["exec"][0], "true")  # exec'd directly
+
+    def test_no_subshell_flag_overrides_config(self):
+        """--subshell / --no-subshell win over the config; absence keeps the default."""
+        cfg = self.write_config()          # cfg["subshell"] defaults True
+        self.new(cfg, "off", subshell=False)
+        self.assertFalse(cfg["subshell"])  # --no-subshell turned it off
+        cfg2 = self.write_config()
+        cfg2["subshell"] = False           # config says off
+        self.new(cfg2, "on", subshell=True)
+        self.assertTrue(cfg2["subshell"])  # --subshell turned it on
 
 
 if __name__ == "__main__":

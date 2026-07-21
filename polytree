@@ -20,12 +20,13 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import tomllib
 from pathlib import Path
 
-VERSION = "0.1.7"
+VERSION = "0.1.8"
 VERBOSE = False  # set by --verbose; when on, every git/orca command is echoed
 CONFIG = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "polytree" / "config.toml"
 
@@ -660,9 +661,20 @@ def launch(cfg: dict, spec: dict, host: str, others: list[str], prompt: str | No
         # (e.g. `link` after the agent died) then just runs the agent and returns to
         # that same shell, so shells never stack no matter how often you re-launch.
         if cfg.get("subshell") and sys.stdin.isatty() and not os.environ.get("POLYTREE_SHELL"):
-            subprocess.run(argv, env=full_env)
+            # Ignore SIGINT while the agent runs, the way a shell does — otherwise a
+            # Ctrl-C reaching us (a cooked-mode agent) would abort here, kill the
+            # agent and skip the shell. A *caught* handler (not SIG_IGN, which would
+            # survive exec and leave the agent unable to be interrupted) resets to
+            # SIG_DFL in the child on exec, so the agent still handles Ctrl-C itself.
+            prev = signal.signal(signal.SIGINT, lambda *_: None)
+            try:
+                subprocess.run(argv, env=full_env)
+            finally:
+                signal.signal(signal.SIGINT, prev)  # restore before the shell inherits it
             info(f"\n→ shell in {host}  (exit to return)")
-            sh = os.environ.get("SHELL", "/bin/sh")
+            sh = os.environ.get("SHELL") or "/bin/sh"
+            if shutil.which(sh) is None:  # $SHELL set but bogus -> don't traceback
+                sh = "/bin/sh"
             os.execvpe(sh, [sh], {**os.environ, "POLYTREE_SHELL": "1"})
         os.execvpe(argv[0], argv, full_env)
 
