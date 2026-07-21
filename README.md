@@ -54,6 +54,21 @@ git clone https://github.com/briankalid/polytree && cd polytree
 ln -s "$PWD/polytree" ~/.local/bin/polytree
 ```
 
+### Land in the worktree (optional)
+
+On the git backend, `polytree new`/`link` run the agent *inside* the new worktree — but when you quit the agent your shell is back where you launched from. That's not polytree being unhelpful: a program can't change its parent shell's directory. If you'd rather **land in the worktree**, wrap polytree in a shell function that does the `cd` for you:
+
+```bash
+polytree() {
+  local f; f="$(mktemp)"
+  POLYTREE_CD_FILE="$f" command polytree "$@"
+  local d; d="$(cat "$f" 2>/dev/null)"; rm -f "$f"
+  [ -n "$d" ] && [ -d "$d" ] && cd "$d"
+}
+```
+
+Add that to your `~/.zshrc` or `~/.bashrc`. polytree writes the host worktree's path to `POLYTREE_CD_FILE`; the function reads it and `cd`s there after the agent exits — so after `polytree new feature` (or `--no-launch`) you're standing in the worktree, ready to commit and push. Other commands write nothing, so they never move you.
+
 ### Publishing to PyPI (maintainers)
 
 The version is read straight from the `polytree` script (`VERSION = "…"`), so

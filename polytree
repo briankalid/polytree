@@ -25,7 +25,7 @@ import sys
 import tomllib
 from pathlib import Path
 
-VERSION = "0.1.3"
+VERSION = "0.1.4"
 VERBOSE = False  # set by --verbose; when on, every git/orca command is echoed
 CONFIG = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "polytree" / "config.toml"
 
@@ -620,12 +620,29 @@ def build_argv(cfg: dict, spec: dict, others: list[str], prompt: str | None = No
     return argv, {k: str(v) for k, v in (spec.get("env") or {}).items()}
 
 
+def record_dir(path: str) -> None:
+    """Leave the launch directory where a shell wrapper can find it.
+
+    A process cannot change its parent shell's cwd, so on the git backend the
+    shell lands back where you launched from once the agent exits — not in the
+    worktree. The optional `pt()` shell function (see the README) passes
+    POLYTREE_CD_FILE and cds into whatever we write here.
+    """
+    cd_file = os.environ.get("POLYTREE_CD_FILE")
+    if cd_file:
+        try:
+            Path(cd_file).write_text(path)
+        except OSError:
+            pass
+
+
 def launch(cfg: dict, spec: dict, host: str, others: list[str], prompt: str | None = None) -> None:
     argv, env = build_argv(cfg, spec, others, prompt)
     info(f"→ {cfg['agent']} in:")
     info(f"    host : {host}")
     for d in others:
         info(f"    +dir : {d}")
+    record_dir(host)
 
     if cfg["backend"] == "orca":
         # Orca runs this string through a shell, hence the quoting and `K=v cmd`.
@@ -751,9 +768,10 @@ def cmd_new(cfg: dict, a: argparse.Namespace) -> None:
         rollback(cfg, created, branch, ours)
         raise
 
-    if a.no_launch:
-        return
     _, host_path = pick_host(created, a.host)
+    if a.no_launch:
+        record_dir(host_path)  # so the pt() shell wrapper still cds into the set
+        return
     launch(cfg, spec, host_path, [p for _, p in created if p != host_path], a.prompt)
 
 

@@ -231,6 +231,18 @@ class TestNewAndRollback(Base):
         self.assertIn("feat", pt.worktrees_of(str(self.api)))
         self.assertIn("feat", pt.worktrees_of(str(self.web)))
 
+    def test_records_the_host_dir_for_a_shell_wrapper(self):
+        """POLYTREE_CD_FILE gets the host worktree, so a shell function can cd
+        into the set — a program can't move its parent shell on its own."""
+        cd_file = self.tmp / "cdfile"
+        prev = os.environ.get("POLYTREE_CD_FILE")
+        os.environ["POLYTREE_CD_FILE"] = str(cd_file)
+        self.addCleanup(lambda: os.environ.__setitem__("POLYTREE_CD_FILE", prev) if prev is not None
+                        else os.environ.pop("POLYTREE_CD_FILE", None))
+        cfg = self.write_config()
+        self.new(cfg, "landing")  # helper passes no_launch=True
+        self.assertEqual(cd_file.read_text(), pt.worktrees_of(str(self.api))["landing"])
+
     def test_preflight_existing_branch_creates_nothing(self):
         """Re-running new must fail cleanly, without creating a partial set."""
         git(self.web, "branch", "collide", "main")
