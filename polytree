@@ -25,7 +25,7 @@ import sys
 import tomllib
 from pathlib import Path
 
-VERSION = "0.1.2"
+VERSION = "0.1.3"
 VERBOSE = False  # set by --verbose; when on, every git/orca command is echoed
 CONFIG = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "polytree" / "config.toml"
 
@@ -86,6 +86,17 @@ def info(msg: str) -> None:
     print(msg, flush=True)
 
 
+def confirm(prompt: str) -> bool:
+    """Ask a yes/no question. Refuses (returns False) when there is no terminal
+    to ask — so a non-interactive run never blocks or assumes 'yes'."""
+    if not sys.stdin.isatty():
+        return False
+    try:
+        return input(f"{prompt} [y/N] ").strip().lower() in ("y", "yes")
+    except EOFError:
+        return False
+
+
 # ----------------------------------------------------------------------- process
 def trace(args: list[str], cwd: str | None = None) -> None:
     if VERBOSE:
@@ -117,19 +128,33 @@ def orca_error(stdout: str) -> str | None:
     return None
 
 
-def orca_run(args: list[str], cwd: str | None = None) -> str:
-    """Run an Orca CLI command, surfacing the reason it gives when it fails."""
+def orca_hint(reason: str) -> str:
+    if reason == "repo_not_found" or any(
+        s in reason.lower() for s in ("not found", "not registered", "unknown repo", "no such repo")
+    ):
+        return ('\n  That repo is not registered in Orca. Add it with '
+                '`orca repo add --path <path>`, or set backend = "git" to skip Orca.')
+    return ""
+
+
+def orca_try(args: list[str], cwd: str | None = None) -> tuple[str, str | None]:
+    """Run an Orca command; return (stdout, reason). `reason` is why it failed, or
+    None. Never dies — the caller decides. Orca reports failures as JSON on stdout
+    ({"ok": false, "error": {...}}); the generic runner only sees stderr (empty)."""
     trace(args, cwd)
     p = subprocess.run(args, cwd=cwd, capture_output=True, text=True)
     reason = orca_error(p.stdout)
-    if p.returncode != 0 or reason:
-        reason = reason or p.stderr.strip() or "command failed"
-        hint = ""
-        if any(s in reason.lower() for s in ("not found", "not registered", "unknown repo", "no such repo")):
-            hint = ('\n  That repo may not be registered in Orca yet. Add it with '
-                    '`orca repo add <path>`, or set backend = "git" to skip Orca.')
-        die(f"orca: {reason}{hint}")
-    return p.stdout
+    if p.returncode != 0 and not reason:
+        reason = p.stderr.strip() or "command failed"
+    return p.stdout, reason
+
+
+def orca_run(args: list[str], cwd: str | None = None) -> str:
+    """Run an Orca command, surfacing the reason it gives when it fails."""
+    out, reason = orca_try(args, cwd)
+    if reason:
+        die(f"orca: {reason}{orca_hint(reason)}")
+    return out
 
 
 def git(repo: str, *args: str, check: bool = True) -> str:
@@ -407,7 +432,15 @@ def create_orca(cfg: dict, repo: dict, branch: str, override: str | None = None,
     # know whether Orca invented the branch or grabbed one that was already there.
     before = {r["worktree"] for r in worktree_records(repo["path"])}
     branches_before = local_branches(repo)
-    orca_run(args)
+    out, reason = orca_try(args)
+    if reason == "repo_not_found" and sel.startswith("path:"):
+        # Orca doesn't know this repo yet. Offer to register it and retry, rather
+        # than dying and leaving the user to run `orca repo add` by hand.
+        if confirm(f"{repo['name']} is not registered in Orca. Add it (orca repo add {repo['path']})?"):
+            orca_run([orca_bin(), "repo", "add", "--path", repo["path"], "--json"])
+            out, reason = orca_try(args)
+    if reason:
+        die(f"orca: {reason}{orca_hint(reason)}")
     fresh = [r for r in worktree_records(repo["path"]) if r["worktree"] not in before]
     if len(fresh) != 1:
         die(

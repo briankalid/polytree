@@ -85,6 +85,8 @@ path = "~/code/my-web"
 
 Each repo's directory name must be unique — it's the folder name under `<root>/<branch>/`. Set `name = "..."` explicitly if two repos share a basename.
 
+> **macOS note.** The branch name is itself a directory component (`<root>/<branch>/`). On a **case-insensitive** filesystem — the default on macOS (APFS) — two branches that differ only in case, like `Fix-typo` and `fix-typo`, resolve to the *same* folder and collide. On Linux, whose filesystems are case-sensitive, they're distinct. If you're on a stock Mac, keep feature branches distinct by more than case.
+
 ### Which ref do the branches start from?
 
 Per repo, in order: `--base` on the command line → that repo's `base` → the global `base` → the repo's `origin/HEAD` → its local default branch. If none of those resolve, polytree tells you instead of guessing. The chosen ref is checked in every repo before anything is created.
@@ -230,7 +232,9 @@ Discovery is always plain git, so `polytree link`, `paths` and `rm` work on work
 
 ### Finding a repo in Orca
 
-You don't normally configure this: polytree locates each repo inside Orca **by its filesystem path**, which just works. Only in the rare case Orca can't resolve a repo that way do you pin it explicitly, with an `orca` selector on that repo:
+You don't normally configure this: polytree locates each repo inside Orca **by its filesystem path**. And if a repo isn't registered in Orca yet, `polytree new` doesn't just fail — it offers to register it for you (`orca repo add`) and retries, so a fresh machine works after a single `y`.
+
+You only pin a repo explicitly in the rarer case Orca can't match an already-registered repo by path — with an `orca` selector on that repo:
 
 ```toml
 [[repos]]

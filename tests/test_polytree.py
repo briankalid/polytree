@@ -853,9 +853,8 @@ class TestOrcaBackend(Base):
         branch already exists it checks it out instead of making a new one — both
         verified against the real CLI. Its `rm` deletes the branch too.
         """
-        real_run, real_bin, real_orca = pt.run, pt.orca_bin, pt.orca_run
-        self.addCleanup(lambda: (setattr(pt, "run", real_run), setattr(pt, "orca_bin", real_bin),
-                                 setattr(pt, "orca_run", real_orca)))
+        saved = {n: getattr(pt, n) for n in ("run", "orca_bin", "orca_run", "orca_try")}
+        self.addCleanup(lambda: [setattr(pt, n, f) for n, f in saved.items()])
         pt.orca_bin = lambda: "fake-orca"
 
         def fake(args, cwd=None, check=True):
@@ -882,10 +881,11 @@ class TestOrcaBackend(Base):
                 return "{}"
             if args and args[0] == "fake-orca":
                 return "{}"
-            return real_run(args, cwd=cwd, check=check)
+            return saved["run"](args, cwd=cwd, check=check)
 
         pt.run = fake
         pt.orca_run = fake
+        pt.orca_try = lambda args, cwd=None: (fake(args, cwd), None)
 
     def _orca_config(self):
         cfg = self.tmp / "orca.toml"
@@ -919,6 +919,54 @@ class TestOrcaBackend(Base):
         self.assertEqual(git(self.api, "rev-parse", "zz-collide").strip(), sha)  # untouched
         self.assertNotIn("zz/collide", pt.local_branches(cfg["repos"][0]))
         self.assertNotIn("zz-collide", pt.worktrees_of(str(self.api)))  # worktree taken back
+
+    def test_offers_to_register_an_unknown_repo_and_retries(self):
+        """Orca returns repo_not_found for a repo it doesn't track; polytree offers
+        to `orca repo add` it and retries the create, instead of failing."""
+        self._fake_orca()
+        cfg = self._orca_config()
+        base_try, base_run = pt.orca_try, pt.orca_run
+        real_confirm = pt.confirm
+        self.addCleanup(lambda: [setattr(pt, "orca_try", base_try),
+                                 setattr(pt, "orca_run", base_run),
+                                 setattr(pt, "confirm", real_confirm)])
+        registered: set = set()
+        add_calls: list = []
+
+        def gated_try(args, cwd=None):
+            if "create" in args:
+                sel = args[args.index("--repo") + 1].removeprefix("path:")
+                if sel not in registered:
+                    return ("{}", "repo_not_found")  # unknown until it's added
+            return base_try(args, cwd)
+
+        def gated_run(args, cwd=None):
+            if "repo" in args and "add" in args:
+                add_calls.append(args)
+                registered.add(args[args.index("--path") + 1])
+                return "{}"
+            return base_run(args, cwd)
+
+        pt.orca_try, pt.orca_run, pt.confirm = gated_try, gated_run, lambda _p: True
+        self.new(cfg, "reg-test")
+        self.assertEqual(len(add_calls), 2)  # both repos registered
+        self.assertIn("reg-test", pt.worktrees_of(str(self.api)))
+        self.assertIn("reg-test", pt.worktrees_of(str(self.web)))
+
+    def test_declining_to_register_fails_cleanly(self):
+        """Say no, and it's the same half-a-set refusal: nothing is left behind."""
+        self._fake_orca()
+        cfg = self._orca_config()
+        base_try, real_confirm = pt.orca_try, pt.confirm
+        self.addCleanup(lambda: [setattr(pt, "orca_try", base_try),
+                                 setattr(pt, "confirm", real_confirm)])
+        pt.orca_try = lambda args, cwd=None: (("{}", "repo_not_found") if "create" in args
+                                              else base_try(args, cwd))
+        pt.confirm = lambda _p: False
+        with self.assertRaises(pt.Fail) as e:
+            self.new(cfg, "nope")
+        self.assertIn("repo_not_found", str(e.exception))
+        self.assertNotIn("nope", pt.worktrees_of(str(self.api)))
 
 
 class TestRollbackNeverTakesSomeoneElsesBranch(Base):
