@@ -58,11 +58,13 @@ ln -s "$PWD/polytree" ~/.local/bin/polytree
 
 On the git backend, `polytree new`/`link` run the agent *inside* the worktree — but quit the agent and your shell is back where you launched from. That's not polytree being unhelpful: **a program can't change its parent shell's directory.** The orca backend sidesteps this (the agent gets its own terminal in the worktree); on the git backend you have two options.
 
-**Drop into a shell there (`shell = true`)** — no shell config, works in every terminal. When the agent exits, polytree hands control to a shell already in the worktree; `exit` returns you to where you launched:
+**Drop into a shell there (`subshell = true`)** — no shell config, works in every terminal. When the agent exits, polytree hands control to a shell already in the worktree; `exit` returns you to where you launched:
 
 ```toml
-shell = true    # in config.toml — or pass --shell for one run
+subshell = true    # in config.toml — or pass --subshell for one run
 ```
+
+Relaunching from inside that shell (say `polytree link` after the agent died) just runs the agent and returns you to the *same* shell — shells never stack, however often you re-launch.
 
 ```console
 $ polytree new feature        # agent runs… you quit it…
@@ -184,7 +186,7 @@ Both also take `--agent <name>` to override the configured agent for one run, an
 | `--agent NAME` | Use this agent for the run, overriding the config |
 | `--prompt TEXT` | Hand the agent an initial prompt on startup |
 | `--no-launch` | Create the worktrees, don't start the agent |
-| `--shell` | git backend: drop into a shell in the worktree when the agent exits (see [Land in the worktree](#land-in-the-worktree-git-backend)) |
+| `--subshell` | git backend: drop into a shell in the worktree when the agent exits (see [Land in the worktree](#land-in-the-worktree-git-backend)) |
 
 **`link [branch]`** — launch the agent on an existing set (no branch = the one you're standing in):
 
@@ -193,7 +195,7 @@ Both also take `--agent <name>` to override the configured agent for one run, an
 | `--host REPO` | Repo that hosts the agent (default: first in config) |
 | `--agent NAME` | Use this agent for the run, overriding the config |
 | `--prompt TEXT` | Hand the agent an initial prompt on startup |
-| `--shell` | git backend: drop into a shell in the worktree when the agent exits |
+| `--subshell` | git backend: drop into a shell in the worktree when the agent exits |
 
 **`rm [branch]`** — remove the set (no branch = the one you're standing in):
 

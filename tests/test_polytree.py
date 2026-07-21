@@ -1378,18 +1378,25 @@ class TestShellAfterAgent(Base):
             pt.launch(cfg, {"cmd": "true", "attach": "--add-dir {dir}"}, host, [])
         return events
 
-    def test_shell_true_runs_agent_then_a_shell_in_the_worktree(self):
-        """shell=true (git backend): the agent runs, then control passes to a shell
-        in the worktree — so you land there, not back where you launched."""
+    def _set_env(self, key, val):
+        prev = os.environ.get(key)
+        os.environ.pop(key, None) if val is None else os.environ.__setitem__(key, val)
+        self.addCleanup(lambda: os.environ.__setitem__(key, prev) if prev is not None
+                        else os.environ.pop(key, None))
+
+    def test_subshell_true_runs_agent_then_a_shell_in_the_worktree(self):
+        """subshell=true (git backend): the agent runs, then control passes to a
+        shell in the worktree — so you land there, not back where you launched."""
+        self._set_env("POLYTREE_SHELL", None)  # not already inside one
         cfg = self.write_config()
-        cfg["shell"] = True
+        cfg["subshell"] = True
         self.new(cfg, "shellset")  # helper uses no_launch=True, so this just creates
         host = pt.worktrees_of(str(self.api))["shellset"]
         events = self._spy_launch(cfg, host)
         self.assertEqual(events["agent"], ["true"])  # agent ran as a subprocess first
         self.assertEqual(events["exec"][0], os.environ.get("SHELL", "/bin/sh"))  # then a shell
 
-    def test_shell_false_execs_the_agent_directly(self):
+    def test_subshell_false_execs_the_agent_directly(self):
         """Default: no subshell — polytree becomes the agent, as before."""
         cfg = self.write_config()
         self.new(cfg, "noshell")
@@ -1397,6 +1404,18 @@ class TestShellAfterAgent(Base):
         events = self._spy_launch(cfg, host)
         self.assertNotIn("agent", events)          # not run as a subprocess
         self.assertEqual(events["exec"][0], "true")  # exec'd directly
+
+    def test_no_nesting_when_already_in_a_polytree_shell(self):
+        """Relaunching from inside a polytree shell (e.g. `link` after the agent
+        died) just runs the agent and returns to that same shell — no stacking."""
+        self._set_env("POLYTREE_SHELL", "1")  # already inside one
+        cfg = self.write_config()
+        cfg["subshell"] = True
+        self.new(cfg, "renest")
+        host = pt.worktrees_of(str(self.api))["renest"]
+        events = self._spy_launch(cfg, host)
+        self.assertNotIn("agent", events)          # not run as a subprocess
+        self.assertEqual(events["exec"][0], "true")  # exec'd directly, same shell on exit
 
 
 if __name__ == "__main__":

@@ -3,8 +3,8 @@ backend = "auto"            # auto | git | orca  (auto = orca if installed, else
 agent   = "claude"          # any key under [agents], or a built-in (claude, codex)
 root    = "~/polytree"      # git backend: worktrees live at <root>/<feature>/<repo>
 base    = "origin/main"     # optional global default base ref
-# shell = true              # git backend: when the agent exits, drop into a shell
-#                           #   in the worktree (or pass --shell per run)
+# subshell = true           # git backend: when the agent exits, drop into a shell
+#                           #   in the worktree (or pass --subshell per run)
 
 [[repos]]                   # the first repo (or host = true) hosts the agent
 path = "~/code/my-api"
