@@ -15,6 +15,7 @@ License: MIT
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import shlex
@@ -24,7 +25,8 @@ import sys
 import tomllib
 from pathlib import Path
 
-VERSION = "0.1.1"
+VERSION = "0.1.2"
+VERBOSE = False  # set by --verbose; when on, every git/orca command is echoed
 CONFIG = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "polytree" / "config.toml"
 
 # Built-in agent adapters. Anything here can be overridden/extended from config.
@@ -85,10 +87,48 @@ def info(msg: str) -> None:
 
 
 # ----------------------------------------------------------------------- process
+def trace(args: list[str], cwd: str | None = None) -> None:
+    if VERBOSE:
+        line = " ".join(shlex.quote(a) for a in args)
+        print(f"+ {line}" + (f"   (cwd={cwd})" if cwd else ""), file=sys.stderr, flush=True)
+
+
 def run(args: list[str], cwd: str | None = None, check: bool = True) -> str:
+    trace(args, cwd)
     p = subprocess.run(args, cwd=cwd, capture_output=True, text=True)
     if check and p.returncode != 0:
         die(f"command failed: {' '.join(args)}\n{p.stderr.strip()}")
+    return p.stdout
+
+
+def orca_error(stdout: str) -> str | None:
+    """The message Orca reports in its JSON, or None if it did not report one.
+
+    Orca prints failures to stdout as {"ok": false, "error": {"message": ...}}.
+    The generic runner only ever shows stderr, which Orca leaves empty — so on
+    its own a failed Orca call looks like a bare command with no reason.
+    """
+    try:
+        payload = json.loads(stdout)
+    except (ValueError, TypeError):
+        return None
+    if isinstance(payload, dict) and not payload.get("ok", True):
+        return (payload.get("error") or {}).get("message") or "Orca reported a failure"
+    return None
+
+
+def orca_run(args: list[str], cwd: str | None = None) -> str:
+    """Run an Orca CLI command, surfacing the reason it gives when it fails."""
+    trace(args, cwd)
+    p = subprocess.run(args, cwd=cwd, capture_output=True, text=True)
+    reason = orca_error(p.stdout)
+    if p.returncode != 0 or reason:
+        reason = reason or p.stderr.strip() or "command failed"
+        hint = ""
+        if any(s in reason.lower() for s in ("not found", "not registered", "unknown repo", "no such repo")):
+            hint = ('\n  That repo may not be registered in Orca yet. Add it with '
+                    '`orca repo add <path>`, or set backend = "git" to skip Orca.')
+        die(f"orca: {reason}{hint}")
     return p.stdout
 
 
@@ -97,6 +137,7 @@ def git(repo: str, *args: str, check: bool = True) -> str:
 
 
 def git_ok(repo: str, *args: str) -> bool:
+    trace(["git", "-C", repo, *args])
     return subprocess.run(["git", "-C", repo, *args], capture_output=True, text=True).returncode == 0
 
 
@@ -155,6 +196,11 @@ def load_config() -> dict:
     cfg["agents"] = agents
 
     backend = cfg.get("backend", "auto")
+    # Case-insensitive: "Git"/"ORCA" are the same intent, and a rejected config
+    # over a stray capital is a poor welcome. The value is a fixed keyword, not
+    # a name, so normalising is safe.
+    if isinstance(backend, str):
+        backend = backend.strip().lower()
     if backend not in ("auto", "git", "orca"):
         die(f"invalid backend {backend!r} (auto | git | orca)")
     if backend == "auto":
@@ -361,7 +407,7 @@ def create_orca(cfg: dict, repo: dict, branch: str, override: str | None = None,
     # know whether Orca invented the branch or grabbed one that was already there.
     before = {r["worktree"] for r in worktree_records(repo["path"])}
     branches_before = local_branches(repo)
-    run(args)
+    orca_run(args)
     fresh = [r for r in worktree_records(repo["path"]) if r["worktree"] not in before]
     if len(fresh) != 1:
         die(
@@ -551,7 +597,7 @@ def launch(cfg: dict, spec: dict, host: str, others: list[str], prompt: str | No
     if cfg["backend"] == "orca":
         # Orca runs this string through a shell, hence the quoting and `K=v cmd`.
         cmd = " ".join([f"{k}={shlex.quote(v)}" for k, v in env.items()] + [shlex.quote(a) for a in argv])
-        run([orca_bin(), "terminal", "create", "--worktree", f"path:{host}", "--command", cmd, "--json"])
+        orca_run([orca_bin(), "terminal", "create", "--worktree", f"path:{host}", "--command", cmd, "--json"])
         info("    (Orca-managed terminal)")
     else:
         os.chdir(host)
@@ -859,9 +905,13 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p.add_argument("--version", action="version", version=f"polytree {VERSION}")
+    # Shared by every subcommand, so `-v` works after the command too (polytree new -v …).
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("-v", "--verbose", action="store_true",
+                        help="echo each git/orca command as it runs (to stderr)")
     sub = p.add_subparsers(dest="cmd", metavar="<command>")
 
-    n = sub.add_parser("new", help="create the worktree set in every repo + launch the agent")
+    n = sub.add_parser("new", parents=[common], help="create the worktree set in every repo + launch the agent")
     n.add_argument("name", nargs="?", help="branch name, used in every repo")
     n.add_argument("--host", metavar="REPO", help="repo that hosts the agent (default: first in config)")
     n.add_argument("--base", metavar="REF", help="branch off this ref instead of the configured base (e.g. --base origin/master for a hotfix)")
@@ -875,18 +925,18 @@ def build_parser() -> argparse.ArgumentParser:
     n.add_argument("--no-launch", action="store_true", help="create the worktrees, don't start the agent")
     n.set_defaults(fn=cmd_new)
 
-    lk = sub.add_parser("link", help="existing worktrees: launch the agent across them")
+    lk = sub.add_parser("link", parents=[common], help="existing worktrees: launch the agent across them")
     lk.add_argument("branch", nargs="?", help="default: the branch of the current directory")
     lk.add_argument("--host", metavar="REPO", help="repo that hosts the agent (default: first in config)")
     lk.add_argument("--agent", metavar="NAME", help="agent for this run, overriding the config")
     lk.add_argument("--prompt", metavar="TEXT", help="initial prompt for the agent")
     lk.set_defaults(fn=cmd_link)
 
-    pa = sub.add_parser("paths", help="print the sibling worktree paths (no side effects)")
+    pa = sub.add_parser("paths", parents=[common], help="print the sibling worktree paths (no side effects)")
     pa.add_argument("branch", nargs="?", help="default: the branch of the current directory")
     pa.set_defaults(fn=cmd_paths)
 
-    rm = sub.add_parser("rm", help="remove the worktree set for a branch (refuses if dirty/locked)")
+    rm = sub.add_parser("rm", parents=[common], help="remove the worktree set for a branch (refuses if dirty/locked)")
     rm.add_argument("branch", nargs="?", help="default: the branch of the current directory")
     rm.add_argument("--force", action="store_true",
                     help="discard uncommitted changes, remove locked worktrees, and delete the "
@@ -895,10 +945,10 @@ def build_parser() -> argparse.ArgumentParser:
                     help="skip the confirmation prompt (for scripts)")
     rm.set_defaults(fn=cmd_rm)
 
-    li = sub.add_parser("list", help="show your feature sets: branches with a worktree in 2+ repos")
+    li = sub.add_parser("list", parents=[common], help="show your feature sets: branches with a worktree in 2+ repos")
     li.set_defaults(fn=cmd_list)
 
-    ls = sub.add_parser("ls", help="show the resolved config")
+    ls = sub.add_parser("ls", parents=[common], help="show the resolved config")
     ls.set_defaults(fn=cmd_ls)
     return p
 
@@ -910,6 +960,9 @@ def main() -> None:
         pass
     parser = build_parser()
     args = parser.parse_args()
+    if getattr(args, "verbose", False):
+        global VERBOSE
+        VERBOSE = True
     if not getattr(args, "fn", None):
         parser.print_help()
         return

@@ -461,6 +461,15 @@ class TestConfigRejections(HardeningBase):
             self.load_raw(self.two_repo_toml('backend = "docker"\n'))
         self.assertIn("invalid backend", str(e.exception))
 
+    def test_backend_is_case_insensitive(self):
+        """A stray capital — `"Git"` for `"git"` — should not reject the config;
+        the value is a fixed keyword, not a name."""
+        self.assertEqual(self.load_raw(self.two_repo_toml('backend = "Git"\n'))["backend"], "git")
+        real = pt.orca_bin
+        self.addCleanup(lambda: setattr(pt, "orca_bin", real))
+        pt.orca_bin = lambda: "/usr/bin/fake-orca"
+        self.assertEqual(self.load_raw(self.two_repo_toml('backend = "ORCA"\n'))["backend"], "orca")
+
     def test_backend_orca_without_the_cli(self):
         real = pt.orca_bin
         self.addCleanup(lambda: setattr(pt, "orca_bin", real))
@@ -552,12 +561,12 @@ class TestQuotingAndPrompts(HardeningBase):
         string must shlex-split back into exactly what was meant."""
         cfg = self.write_config()
         cfg["backend"] = "orca"
-        real_run, real_bin = pt.run, pt.orca_bin
-        self.addCleanup(lambda: (setattr(pt, "run", real_run),
+        real_run, real_bin = pt.orca_run, pt.orca_bin
+        self.addCleanup(lambda: (setattr(pt, "orca_run", real_run),
                                  setattr(pt, "orca_bin", real_bin)))
         pt.orca_bin = lambda: "fake-orca"
         calls = []
-        pt.run = lambda args, cwd=None, check=True: (calls.append(args), "{}")[1]
+        pt.orca_run = lambda args, cwd=None: (calls.append(args), "{}")[1]
 
         spec = {"cmd": "true", "attach": "--add-dir {dir}", "env": {"FOO": "a b"}}
         host = str(self.tmp / "host with space")
@@ -620,6 +629,34 @@ class TestMiscHardening(HardeningBase):
         self.assertIn("already exists", str(e.exception))
         self.assertIn("nothing was created", str(e.exception))
         self.assertNotIn("occupied", pt.worktrees_of(str(self.web)))
+
+
+class TestOrcaErrorSurfacing(HardeningBase):
+    """Orca reports failures as JSON on stdout, and the generic runner shows only
+    stderr — so a failed Orca call used to look like a bare command with no reason."""
+
+    def test_orca_error_extracts_the_message(self):
+        self.assertEqual(
+            pt.orca_error('{"ok": false, "error": {"message": "repo not found"}}'),
+            "repo not found")
+        self.assertIsNone(pt.orca_error('{"ok": true, "result": {}}'))  # success
+        self.assertIsNone(pt.orca_error("not json at all"))             # noise
+
+    def test_orca_run_dies_with_the_reason_and_a_hint(self):
+        real = subprocess.run
+        self.addCleanup(lambda: setattr(subprocess, "run", real))
+
+        class FakeProc:
+            returncode = 1
+            stdout = '{"ok": false, "error": {"message": "repo not found"}}'
+            stderr = ""
+
+        subprocess.run = lambda *a, **k: FakeProc()
+        with self.assertRaises(pt.Fail) as e:
+            pt.orca_run(["orca", "worktree", "create", "--repo", "path:/nope"])
+        msg = str(e.exception)
+        self.assertIn("repo not found", msg)   # the real reason, not an empty stderr
+        self.assertIn("orca repo add", msg)    # the actionable hint on the not-found case
 
 
 if __name__ == "__main__":

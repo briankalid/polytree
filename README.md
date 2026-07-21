@@ -169,7 +169,7 @@ Both also take `--agent <name>` to override the configured agent for one run, an
 | `--force` | Discard uncommitted changes, remove locked worktrees, and delete the branch even if unmerged |
 | `-y`, `--yes` | Skip the confirmation prompt (for scripts) |
 
-**`paths [branch]`**, **`list`**, and **`ls`** take no flags; `paths` and `list` have no side effects. Every command has `-h/--help`, and `polytree --version` prints the version.
+**`paths [branch]`**, **`list`**, and **`ls`** take no flags of their own. Every command accepts `-v`/`--verbose` (echo each underlying git/orca command to stderr — handy when Orca misbehaves) and `-h`/`--help`; `polytree --version` prints the version.
 
 **Two agents on one set.** Because `link` only attaches — it never creates — you can run it more than once. Point Claude at the set in one terminal and Codex in another, both seeing the same worktrees:
 

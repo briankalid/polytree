@@ -853,8 +853,9 @@ class TestOrcaBackend(Base):
         branch already exists it checks it out instead of making a new one — both
         verified against the real CLI. Its `rm` deletes the branch too.
         """
-        real_run, real_bin = pt.run, pt.orca_bin
-        self.addCleanup(lambda: (setattr(pt, "run", real_run), setattr(pt, "orca_bin", real_bin)))
+        real_run, real_bin, real_orca = pt.run, pt.orca_bin, pt.orca_run
+        self.addCleanup(lambda: (setattr(pt, "run", real_run), setattr(pt, "orca_bin", real_bin),
+                                 setattr(pt, "orca_run", real_orca)))
         pt.orca_bin = lambda: "fake-orca"
 
         def fake(args, cwd=None, check=True):
@@ -884,6 +885,7 @@ class TestOrcaBackend(Base):
             return real_run(args, cwd=cwd, check=check)
 
         pt.run = fake
+        pt.orca_run = fake
 
     def _orca_config(self):
         cfg = self.tmp / "orca.toml"
