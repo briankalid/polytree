@@ -228,6 +228,22 @@ If the slug lands on a branch that already exists, Orca reuses that branch — r
 
 Discovery is always plain git, so `polytree link`, `paths` and `rm` work on worktrees created by either backend. (With the `orca` backend the *launch* goes through Orca, so the host worktree does need to be one Orca knows about.)
 
+### Finding a repo in Orca
+
+You don't normally configure this: polytree locates each repo inside Orca **by its filesystem path**, which just works. Only in the rare case Orca can't resolve a repo that way do you pin it explicitly, with an `orca` selector on that repo:
+
+```toml
+[[repos]]
+path = "~/code/my-api"
+orca = "id:8ecafcbb-8411-4a96-8049-41d08cd67544"   # optional — only if the path won't resolve
+```
+
+The id is the repo's Orca *setup id* (a UUID). List every setup with its path and copy the one you need:
+
+```bash
+orca project setups --json | jq -r '.result.setups[] | "\(.path)  ->  id:\(.id)"'
+```
+
 ## Any agent
 
 **The requirement:** the agent must take one or more extra directories on its command line. If it accepts multiple roots, polytree can drive it; if it can't, it can't be linked — that's the one thing no wrapper fixes.

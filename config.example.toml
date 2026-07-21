@@ -8,6 +8,9 @@ base    = "origin/main"     # optional global default base ref
 path = "~/code/my-api"
 base = "origin/dev"         # optional; overrides the global default
 host = true
+# orca = "id:<uuid>"        # optional (orca backend): pin the repo in Orca ONLY if it
+#                           #   can't be found by path. Get the uuid from:
+#                           #   orca project setups --json
 
 [[repos]]
 path = "~/code/my-web"
