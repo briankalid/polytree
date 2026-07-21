@@ -1397,8 +1397,9 @@ class TestShellAfterAgent(Base):
         self.assertEqual(events["exec"][0], os.environ.get("SHELL", "/bin/sh"))  # then a shell
 
     def test_subshell_false_execs_the_agent_directly(self):
-        """Default: no subshell — polytree becomes the agent, as before."""
+        """Opted out (subshell=false): polytree becomes the agent, no subshell."""
         cfg = self.write_config()
+        cfg["subshell"] = False
         self.new(cfg, "noshell")
         host = pt.worktrees_of(str(self.api))["noshell"]
         events = self._spy_launch(cfg, host)

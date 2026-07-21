@@ -56,25 +56,20 @@ ln -s "$PWD/polytree" ~/.local/bin/polytree
 
 ### Land in the worktree (git backend)
 
-On the git backend, `polytree new`/`link` run the agent *inside* the worktree — but quit the agent and your shell is back where you launched from. That's not polytree being unhelpful: **a program can't change its parent shell's directory.** The orca backend sidesteps this (the agent gets its own terminal in the worktree); on the git backend you have two options.
-
-**Drop into a shell there (`subshell = true`)** — no shell config, works in every terminal. When the agent exits, polytree hands control to a shell already in the worktree; `exit` returns you to where you launched:
-
-```toml
-subshell = true    # in config.toml — or pass --subshell for one run
-```
-
-Relaunching from inside that shell (say `polytree link` after the agent died) just runs the agent and returns you to the *same* shell — shells never stack, however often you re-launch.
+On the git backend, `polytree new`/`link` run the agent *inside* the worktree. A program can't change its parent shell's directory, so instead of dropping you back where you launched when the agent exits, polytree **lands you in a shell already in the worktree** — ready to commit and push:
 
 ```console
 $ polytree new feature        # agent runs… you quit it…
 → shell in ~/polytree/feature/my-api  (exit to return)
 $ git push -u origin feature  # you're in the worktree
+$ exit                        # back to where you launched
 ```
 
-The tradeoff is a nested shell (one extra `exit`).
+This is **on by default** (git backend only — the orca backend gives the agent its own terminal). It keeps your dev loop unbroken: if the agent dies, you're still in the worktree, so `polytree link` picks right back up. And relaunching from inside that shell runs the agent and returns you to the *same* shell — shells never stack, however often you re-launch.
 
-**Or a true `cd`, via a shell function** — no nested shell, but it's a one-time edit to your `~/.zshrc`/`~/.bashrc`. polytree writes the worktree path to `POLYTREE_CD_FILE`; the function reads it and `cd`s there after the agent exits:
+The one cost is a nested shell (one extra `exit`). To turn it off, `subshell = false` in the config, or `--no-subshell` for one run.
+
+**Prefer a true `cd`?** For no nested shell — your current shell moves into the worktree — set `subshell = false` and add this to your `~/.zshrc`/`~/.bashrc`. polytree writes the worktree path to `POLYTREE_CD_FILE`; the function reads it and `cd`s there after the agent exits:
 
 ```bash
 polytree() {
@@ -186,7 +181,7 @@ Both also take `--agent <name>` to override the configured agent for one run, an
 | `--agent NAME` | Use this agent for the run, overriding the config |
 | `--prompt TEXT` | Hand the agent an initial prompt on startup |
 | `--no-launch` | Create the worktrees, don't start the agent |
-| `--subshell` | git backend: drop into a shell in the worktree when the agent exits (see [Land in the worktree](#land-in-the-worktree-git-backend)) |
+| `--subshell` / `--no-subshell` | git backend: land in a shell in the worktree when the agent exits. **On by default** ([Land in the worktree](#land-in-the-worktree-git-backend)) |
 
 **`link [branch]`** — launch the agent on an existing set (no branch = the one you're standing in):
 
@@ -195,7 +190,7 @@ Both also take `--agent <name>` to override the configured agent for one run, an
 | `--host REPO` | Repo that hosts the agent (default: first in config) |
 | `--agent NAME` | Use this agent for the run, overriding the config |
 | `--prompt TEXT` | Hand the agent an initial prompt on startup |
-| `--subshell` | git backend: drop into a shell in the worktree when the agent exits |
+| `--subshell` / `--no-subshell` | git backend: land in a shell in the worktree when the agent exits (on by default) |
 
 **`rm [branch]`** — remove the set (no branch = the one you're standing in):
 

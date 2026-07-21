@@ -25,7 +25,7 @@ import sys
 import tomllib
 from pathlib import Path
 
-VERSION = "0.1.6"
+VERSION = "0.1.7"
 VERBOSE = False  # set by --verbose; when on, every git/orca command is echoed
 CONFIG = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "polytree" / "config.toml"
 
@@ -235,7 +235,7 @@ def load_config() -> dict:
     cfg["backend"] = backend
     cfg["agent"] = cfg.get("agent", "claude")
     cfg["root"] = str(Path(cfg.get("root", "~/polytree")).expanduser())
-    cfg["subshell"] = bool(cfg.get("subshell", False))  # git backend: drop into a shell in the worktree
+    cfg["subshell"] = bool(cfg.get("subshell", True))  # git backend: land in a shell in the worktree (default on)
     return cfg
 
 
@@ -691,8 +691,8 @@ def cmd_new(cfg: dict, a: argparse.Namespace) -> None:
         die("--issue links the worktree to an issue in Orca; it needs the orca backend")
     if a.agent:
         cfg["agent"] = a.agent
-    if getattr(a, "subshell", False):
-        cfg["subshell"] = True
+    if getattr(a, "subshell", None) is not None:
+        cfg["subshell"] = a.subshell  # --subshell / --no-subshell overrides the config
     # Both of these are answerable from the config alone, so answer them before
     # creating anything — the same rule resolve_agent already follows.
     if a.host and not any(r["name"] == a.host for r in cfg["repos"]):
@@ -821,8 +821,8 @@ def cmd_link(cfg: dict, a: argparse.Namespace) -> None:
         )
     if a.agent:
         cfg["agent"] = a.agent
-    if getattr(a, "subshell", False):
-        cfg["subshell"] = True
+    if getattr(a, "subshell", None) is not None:
+        cfg["subshell"] = a.subshell  # --subshell / --no-subshell overrides the config
     spec = resolve_agent(cfg)
     _, host_path = pick_host(present, a.host)
     launch(cfg, spec, host_path, [p for _, p in present if p != host_path], a.prompt)
@@ -991,8 +991,8 @@ def build_parser() -> argparse.ArgumentParser:
     n.add_argument("--issue", metavar="N", help="link the worktrees to a GitHub issue (orca backend)")
     n.add_argument("--prompt", metavar="TEXT", help="initial prompt for the agent")
     n.add_argument("--no-launch", action="store_true", help="create the worktrees, don't start the agent")
-    n.add_argument("--subshell", action="store_true",
-                   help="git backend: when the agent exits, drop into a shell in the worktree")
+    n.add_argument("--subshell", action=argparse.BooleanOptionalAction, default=None,
+                   help="git backend: on agent exit, land in a shell in the worktree (default: on)")
     n.set_defaults(fn=cmd_new)
 
     lk = sub.add_parser("link", parents=[common], help="existing worktrees: launch the agent across them")
@@ -1000,8 +1000,8 @@ def build_parser() -> argparse.ArgumentParser:
     lk.add_argument("--host", metavar="REPO", help="repo that hosts the agent (default: first in config)")
     lk.add_argument("--agent", metavar="NAME", help="agent for this run, overriding the config")
     lk.add_argument("--prompt", metavar="TEXT", help="initial prompt for the agent")
-    lk.add_argument("--subshell", action="store_true",
-                    help="git backend: when the agent exits, drop into a shell in the worktree")
+    lk.add_argument("--subshell", action=argparse.BooleanOptionalAction, default=None,
+                    help="git backend: on agent exit, land in a shell in the worktree (default: on)")
     lk.set_defaults(fn=cmd_link)
 
     pa = sub.add_parser("paths", parents=[common], help="print the sibling worktree paths (no side effects)")

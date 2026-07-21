@@ -462,8 +462,8 @@ class TestConfigRejections(HardeningBase):
         self.assertIn("invalid backend", str(e.exception))
 
     def test_subshell_option_is_parsed(self):
-        self.assertFalse(self.load_raw(self.two_repo_toml())["subshell"])  # default off
-        self.assertTrue(self.load_raw(self.two_repo_toml('backend = "git"\nsubshell = true\n'))["subshell"])
+        self.assertTrue(self.load_raw(self.two_repo_toml())["subshell"])  # default ON
+        self.assertFalse(self.load_raw(self.two_repo_toml('backend = "git"\nsubshell = false\n'))["subshell"])
 
     def test_backend_is_case_insensitive(self):
         """A stray capital — `"Git"` for `"git"` — should not reject the config;
