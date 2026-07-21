@@ -62,7 +62,9 @@ On the git backend, `polytree new`/`link` run the agent *inside* the worktree. A
 $ polytree new feature        # agent runs… you quit it…
 → shell in ~/polytree/feature/my-api  (exit to return)
 $ git push -u origin feature  # you're in the worktree
-$ exit                        # back to where you launched
+$ exit                        # leave the set in place, back to where you launched
+#   …or, once the feature is merged, tear the whole set down from here first:
+$ polytree rm                 # removes this branch's worktrees, then exit
 ```
 
 This is **on by default** (git backend only — the orca backend gives the agent its own terminal). It keeps your dev loop unbroken: if the agent dies, you're still in the worktree, so `polytree link` picks right back up. And relaunching from inside that shell runs the agent and returns you to the *same* shell — shells never stack, however often you re-launch.
