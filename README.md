@@ -54,9 +54,25 @@ git clone https://github.com/briankalid/polytree && cd polytree
 ln -s "$PWD/polytree" ~/.local/bin/polytree
 ```
 
-### Land in the worktree (optional)
+### Land in the worktree (git backend)
 
-On the git backend, `polytree new`/`link` run the agent *inside* the new worktree — but when you quit the agent your shell is back where you launched from. That's not polytree being unhelpful: a program can't change its parent shell's directory. If you'd rather **land in the worktree**, wrap polytree in a shell function that does the `cd` for you:
+On the git backend, `polytree new`/`link` run the agent *inside* the worktree — but quit the agent and your shell is back where you launched from. That's not polytree being unhelpful: **a program can't change its parent shell's directory.** The orca backend sidesteps this (the agent gets its own terminal in the worktree); on the git backend you have two options.
+
+**Drop into a shell there (`shell = true`)** — no shell config, works in every terminal. When the agent exits, polytree hands control to a shell already in the worktree; `exit` returns you to where you launched:
+
+```toml
+shell = true    # in config.toml — or pass --shell for one run
+```
+
+```console
+$ polytree new feature        # agent runs… you quit it…
+→ shell in ~/polytree/feature/my-api  (exit to return)
+$ git push -u origin feature  # you're in the worktree
+```
+
+The tradeoff is a nested shell (one extra `exit`).
+
+**Or a true `cd`, via a shell function** — no nested shell, but it's a one-time edit to your `~/.zshrc`/`~/.bashrc`. polytree writes the worktree path to `POLYTREE_CD_FILE`; the function reads it and `cd`s there after the agent exits:
 
 ```bash
 polytree() {
@@ -66,8 +82,6 @@ polytree() {
   [ -n "$d" ] && [ -d "$d" ] && cd "$d"
 }
 ```
-
-Add that to your `~/.zshrc` or `~/.bashrc`. polytree writes the host worktree's path to `POLYTREE_CD_FILE`; the function reads it and `cd`s there after the agent exits — so after `polytree new feature` (or `--no-launch`) you're standing in the worktree, ready to commit and push. Other commands write nothing, so they never move you.
 
 ### Publishing to PyPI (maintainers)
 
@@ -170,6 +184,7 @@ Both also take `--agent <name>` to override the configured agent for one run, an
 | `--agent NAME` | Use this agent for the run, overriding the config |
 | `--prompt TEXT` | Hand the agent an initial prompt on startup |
 | `--no-launch` | Create the worktrees, don't start the agent |
+| `--shell` | git backend: drop into a shell in the worktree when the agent exits (see [Land in the worktree](#land-in-the-worktree-git-backend)) |
 
 **`link [branch]`** — launch the agent on an existing set (no branch = the one you're standing in):
 
@@ -178,6 +193,7 @@ Both also take `--agent <name>` to override the configured agent for one run, an
 | `--host REPO` | Repo that hosts the agent (default: first in config) |
 | `--agent NAME` | Use this agent for the run, overriding the config |
 | `--prompt TEXT` | Hand the agent an initial prompt on startup |
+| `--shell` | git backend: drop into a shell in the worktree when the agent exits |
 
 **`rm [branch]`** — remove the set (no branch = the one you're standing in):
 

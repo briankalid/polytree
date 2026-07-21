@@ -1349,5 +1349,55 @@ class TestPickHost(Base):
             pt.pick_host(pairs, "nope")
 
 
+class _ExecCalled(Exception):
+    """Sentinel: os.execvpe never returns, so a fake raises this to stop launch."""
+
+
+class TestShellAfterAgent(Base):
+    def _spy_launch(self, cfg, host):
+        events = {}
+        real_run, real_exec, real_isatty = pt.subprocess.run, pt.os.execvpe, sys.stdin
+        self.addCleanup(lambda: (setattr(pt.subprocess, "run", real_run),
+                                 setattr(pt.os, "execvpe", real_exec),
+                                 setattr(sys, "stdin", real_isatty)))
+
+        def fake_run(argv, env=None, **k):
+            events["agent"] = argv
+            return type("P", (), {"returncode": 0})()
+
+        def fake_exec(f, a, e=None):
+            events["exec"] = (f, a)
+            raise _ExecCalled()
+
+        pt.subprocess.run = fake_run
+        pt.os.execvpe = fake_exec
+        sys.stdin = type("S", (), {"isatty": lambda self: True})()
+        orig = os.getcwd()
+        self.addCleanup(lambda: os.chdir(orig))
+        with self.assertRaises(_ExecCalled):
+            pt.launch(cfg, {"cmd": "true", "attach": "--add-dir {dir}"}, host, [])
+        return events
+
+    def test_shell_true_runs_agent_then_a_shell_in_the_worktree(self):
+        """shell=true (git backend): the agent runs, then control passes to a shell
+        in the worktree — so you land there, not back where you launched."""
+        cfg = self.write_config()
+        cfg["shell"] = True
+        self.new(cfg, "shellset")  # helper uses no_launch=True, so this just creates
+        host = pt.worktrees_of(str(self.api))["shellset"]
+        events = self._spy_launch(cfg, host)
+        self.assertEqual(events["agent"], ["true"])  # agent ran as a subprocess first
+        self.assertEqual(events["exec"][0], os.environ.get("SHELL", "/bin/sh"))  # then a shell
+
+    def test_shell_false_execs_the_agent_directly(self):
+        """Default: no subshell — polytree becomes the agent, as before."""
+        cfg = self.write_config()
+        self.new(cfg, "noshell")
+        host = pt.worktrees_of(str(self.api))["noshell"]
+        events = self._spy_launch(cfg, host)
+        self.assertNotIn("agent", events)          # not run as a subprocess
+        self.assertEqual(events["exec"][0], "true")  # exec'd directly
+
+
 if __name__ == "__main__":
     unittest.main()
